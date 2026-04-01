@@ -11,7 +11,7 @@ def run_shell(shell, db, sql_input):
         input=sql_input,
         capture_output=True,
         text=True,
-        timeout=5000
+        timeout=20000,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"shell error (rc={proc.returncode}): {proc.stderr[:500]}")
@@ -23,7 +23,7 @@ def run_compact(compact_bin, db):
         [compact_bin, db],
         capture_output=True,
         text=True,
-        timeout=5000
+        timeout=20000,
     )
     return proc.stderr
 
@@ -233,11 +233,11 @@ def main():
     parser.add_argument("--datasets", type=str, default="glove,sift",
                         help="Comma-separated dataset names (default: glove,sift)")
     parser.add_argument("--k", type=int, default=10)
-    parser.add_argument("--sqlite4-dir", type=str, default=None,
+    parser.add_argument("--sqlite4-dir", type=str, default="sqlite4_lsm",
                         help="Directory containing 4kb/, 16kb/, ... with sqlite4 + compact_db")
-    parser.add_argument("--sqlite3-dir", type=str, default=None,
+    parser.add_argument("--sqlite3-dir", type=str, default="sqlite3_libsql",
                         help="Directory containing 4kb/, 16kb/, ... with sqlite3")
-    parser.add_argument("--db-dir", type=str, default="/mnt/nvme0")
+    parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
     parser.add_argument("--auto-compact", type=int, default=0, choices=[0, 1],
                         help="0: use compact_db after each batch (autowork=0), "
