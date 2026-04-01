@@ -395,7 +395,7 @@ fts3amal.c:	target_source $(TOP)/ext/fts3/mkfts3amal.tcl
 # Rules to build the LEMON compiler generator
 #
 lemon:	$(TOP)/tool/lemon.c $(TOP)/src/lempar.c
-	$(BCC) -o lemon $(TOP)/tool/lemon.c
+	gcc -O0 -o lemon $(TOP)/tool/lemon.c
 	cp $(TOP)/src/lempar.c .
 
 # Rules to build individual *.o files from generated *.c files. This
