@@ -164,16 +164,16 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
 
 def main():
     parser = argparse.ArgumentParser(description="LSM vector benchmark")
-    parser.add_argument("--dataset-dir", type=str, default=os.path.expanduser("~/dataset"),
-                        help="Directory with SQL files (default: ~/dataset)")
+    parser.add_argument("--dataset-dir", type=str, default=os.path.expanduser("./dataset"),
+                        help="Directory with SQL files (default: ./dataset)")
     parser.add_argument("--datasets", type=str, default="glove,sift",
                         help="Comma-separated dataset names (default: glove,sift)")
-    parser.add_argument("--k", type=int, default=100)
-    parser.add_argument("--sqlite4-dir", type=str, default=None,
+    parser.add_argument("--k", type=int, default=10)
+    parser.add_argument("--sqlite4-dir", type=str, default="./sqlite4_lsm",
                         help="e.g. ~/sqlite4_lsm containing 4kb/, 16kb/, ... with sqlite4 + compact_db")
-    parser.add_argument("--sqlite3-dir", type=str, default=None,
+    parser.add_argument("--sqlite3-dir", type=str, default="./sqlite3_libsql",
                         help="e.g. ~/sqlite3_libsql containing 4kb/, 16kb/, ... with sqlite3")
-    parser.add_argument("--db-dir", type=str, default="/mnt/nvme0")
+    parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
     parser.add_argument("--auto-compact", type=int, default=0, choices=[0, 1],
                         help="0: use compact_db after insert (autowork=0), "
