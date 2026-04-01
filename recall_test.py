@@ -10,7 +10,6 @@ def run_shell(shell, db, sql_input):
         input=sql_input,
         capture_output=True,
         text=True,
-        timeout=1800,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"shell error (rc={proc.returncode}): {proc.stderr[:500]}")
@@ -22,7 +21,6 @@ def run_compact(compact_bin, db):
         [compact_bin, db],
         capture_output=True,
         text=True,
-        timeout=1800,
     )
     return proc.stderr
 
