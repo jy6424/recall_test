@@ -72,7 +72,7 @@ def parse_query_sql(sql_path):
             if not stripped or stripped.upper().startswith("PRAGMA"):
                 continue
             m = re.search(
-                r"FROM\s+vector_top_k\(\s*'(\w+)'\s*,\s*vector\('\[([^\]]+)\]'\)\s*,\s*(\d+)\s*\)",
+                r"FROM\s+vector_top_k\(\s*'(\w+)'\s*,\s*vector(?:32)?\('\[([^\]]+)\]'\)\s*,\s*(\d+)\s*\)",
                 stripped, re.IGNORECASE
             )
             if m:
@@ -94,7 +94,7 @@ def parse_insert_vectors(insert_sql_path):
             m_id = re.search(r"VALUES\s*\(\s*(\d+)\s*,", stripped)
             if not m_id:
                 continue
-            m_vec = re.search(r"vector\('\[([^\]]+)\]'\)", stripped)
+            m_vec = re.search(r"vector(?:32)?\('\[([^\]]+)\]'\)", stripped)
             if not m_vec:
                 continue
             ids.append(int(m_id.group(1)))
