@@ -29,7 +29,6 @@ parse.h
 parse.out
 parse.sql
 /parse.y
-# shell.c
 sqlite3
 /sqlite3.c
 /sqlite3.h
@@ -68,8 +67,6 @@ libsql
 test_libsql_f16_table.h
 test_libsql_f16
 
-sqlite4
-sqlite4.h
 parse.h.temp
 test.db
 
