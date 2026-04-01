@@ -10,6 +10,7 @@ def run_shell(shell, db, sql_input):
         input=sql_input,
         capture_output=True,
         text=True,
+        timeout=5000,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"shell error (rc={proc.returncode}): {proc.stderr[:500]}")
@@ -21,6 +22,7 @@ def run_compact(compact_bin, db):
         [compact_bin, db],
         capture_output=True,
         text=True,
+        timeout=5000,
     )
     return proc.stderr
 
@@ -41,7 +43,6 @@ def parse_output_to_results(output, k):
             id_lines.append(int(line))
         except ValueError:
             pass
-
     results = []
     for i in range(0, len(id_lines), k):
         results.append(set(id_lines[i:i+k]))
@@ -79,17 +80,21 @@ def cleanup_db(db_path, is_sqlite3=False):
 
 
 def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
-                   gt_results, k, db_dir, is_sqlite3=False):
+                   gt_results, k, db_dir, is_sqlite3=False, auto_compact=False):
     db_path = os.path.join(db_dir, f"bench_{label}.db")
     cleanup_db(db_path, is_sqlite3)
 
     result = {"label": label}
-    n_phases = 3 if is_sqlite3 else 4
+    # sqlite3: no compact step
+    # sqlite4 auto_compact=1: no compact step (autowork handles it)
+    # sqlite4 auto_compact=0: compact step needed
+    need_compact = not is_sqlite3 and not auto_compact and compact_bin
+    n_phases = 4 if need_compact else 3
 
     print(f"\n{'='*60}")
     print(f"  Config: {label}")
     print(f"  Shell:   {shell}")
-    if compact_bin:
+    if need_compact:
         print(f"  Compact: {compact_bin}")
     print(f"{'='*60}")
 
@@ -104,8 +109,8 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     result["insert_size_mb"] = round(size_before, 1)
     print(f"        {t_insert:.1f}s, {size_before:.1f} MB")
 
-    # Compact (sqlite4 only)
-    if not is_sqlite3:
+    # Compact (sqlite4 with auto_compact=0 only)
+    if need_compact:
         print(f"  [2/{n_phases}] Compacting...")
         t0 = time.time()
         compact_out = run_compact(compact_bin, db_path)
@@ -123,7 +128,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         result["compact_size_mb"] = round(size_before, 1)
 
     # Query
-    phase_q = 2 if is_sqlite3 else 3
+    phase_q = 3 if need_compact else 2
     print(f"  [{phase_q}/{n_phases}] Querying...")
     query_sql = read_sql(query_sql_path)
     t0 = time.time()
@@ -138,7 +143,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     print(f"        {t_query:.2f}s ({qps:.0f} q/s), {q} queries returned")
 
     # Recall
-    phase_r = 3 if is_sqlite3 else 4
+    phase_r = phase_q + 1
     print(f"  [{phase_r}/{n_phases}] Computing recall@{k}...")
     n_compare = min(len(ann_results), len(gt_results))
     if n_compare == 0:
@@ -159,17 +164,20 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
 
 def main():
     parser = argparse.ArgumentParser(description="LSM vector benchmark")
-    parser.add_argument("--dataset-dir", type=str, default=os.path.expanduser("./dataset"),
-                        help="Directory with SQL files (default: ./dataset)")
+    parser.add_argument("--dataset-dir", type=str, default=os.path.expanduser("~/dataset"),
+                        help="Directory with SQL files (default: ~/dataset)")
     parser.add_argument("--datasets", type=str, default="glove,sift",
                         help="Comma-separated dataset names (default: glove,sift)")
-    parser.add_argument("--k", type=int, default=10)
-    parser.add_argument("--sqlite4-dir", type=str, default="./sqlite4_lsm",
+    parser.add_argument("--k", type=int, default=100)
+    parser.add_argument("--sqlite4-dir", type=str, default=None,
                         help="e.g. ~/sqlite4_lsm containing 4kb/, 16kb/, ... with sqlite4 + compact_db")
-    parser.add_argument("--sqlite3-dir", type=str, default="sqlite3_libsql",
+    parser.add_argument("--sqlite3-dir", type=str, default=None,
                         help="e.g. ~/sqlite3_libsql containing 4kb/, 16kb/, ... with sqlite3")
-    parser.add_argument("--db-dir", type=str, default=".")
+    parser.add_argument("--db-dir", type=str, default="/mnt/nvme0")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
+    parser.add_argument("--auto-compact", type=int, default=0, choices=[0, 1],
+                        help="0: use compact_db after insert (autowork=0), "
+                             "1: skip compact_db (autowork=1 handles it)")
     args = parser.parse_args()
 
     page_sizes_kb = [int(x) for x in args.page_sizes.split(",")]
@@ -191,17 +199,18 @@ def main():
         print("Error: no valid datasets found.")
         return 1
 
-    # Build configs: (label, shell, compact_or_None, is_sqlite3)
+    # Build configs: (label, shell, compact_bin_or_None, is_sqlite3)
     configs = []
 
     if args.sqlite4_dir:
         for ps_kb in page_sizes_kb:
             shell = os.path.join(args.sqlite4_dir, f"{ps_kb}kb", "sqlite4")
             compact = os.path.join(args.sqlite4_dir, f"{ps_kb}kb", "compact_db")
-            if os.path.isfile(shell) and os.path.isfile(compact):
-                configs.append((f"lsm_{ps_kb}kb", shell, compact, False))
-            else:
+            if not os.path.isfile(shell):
                 print(f"Warning: {ps_kb}kb sqlite4 missing, skipping")
+                continue
+            compact_bin = compact if os.path.isfile(compact) else None
+            configs.append((f"lsm_{ps_kb}kb", shell, compact_bin, False))
 
     if args.sqlite3_dir:
         for ps_kb in page_sizes_kb:
@@ -215,10 +224,12 @@ def main():
         print("Error: no valid configurations found.")
         return 1
 
-    print(f"Datasets: {', '.join(n for n, _, _, _ in datasets)}")
-    print(f"Configs:  {', '.join(l for l, _, _, _ in configs)}")
-    print(f"DB dir:   {args.db_dir}")
-    print(f"Total runs: {len(datasets) * len(configs)}")
+    auto_compact = bool(args.auto_compact)
+    print(f"Datasets:     {', '.join(n for n, _, _, _ in datasets)}")
+    print(f"Configs:      {', '.join(l for l, _, _, _ in configs)}")
+    print(f"Auto-compact: {'ON (no compact_db)' if auto_compact else 'OFF (use compact_db)'}")
+    print(f"DB dir:       {args.db_dir}")
+    print(f"Total runs:   {len(datasets) * len(configs)}")
 
     # Run all dataset x config combinations
     all_results = {}
@@ -231,11 +242,12 @@ def main():
         print(f"  Loaded {len(gt_results)} groundtruth queries")
 
         ds_results = []
-        for label, shell, compact, is_s3 in configs:
+        for label, shell, compact_bin, is_s3 in configs:
             run_label = f"{ds_name}_{label}"
             result = run_one_config(
-                run_label, shell, compact, insert_sql, query_sql,
-                gt_results, args.k, args.db_dir, is_sqlite3=is_s3
+                run_label, shell, compact_bin, insert_sql, query_sql,
+                gt_results, args.k, args.db_dir, is_sqlite3=is_s3,
+                auto_compact=auto_compact
             )
             ds_results.append(result)
         all_results[ds_name] = ds_results
@@ -251,7 +263,6 @@ def main():
               f"{'(MB)':>8} {'(MB)':>8} {'@k':>8}")
         print(f"{'-'*80}")
         for r in ds_results:
-            # Strip dataset prefix from label for cleaner display
             short_label = r['label'].replace(f"{ds_name}_", "")
             compact_str = f"{r['compact_time_s']:>8.1f}" if r['compact_time_s'] > 0 else f"{'---':>8}"
             print(f"{short_label:>16} {r['insert_time_s']:>8.1f} "

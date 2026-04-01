@@ -11,7 +11,7 @@ def run_shell(shell, db, sql_input):
         input=sql_input,
         capture_output=True,
         text=True,
-        timeout=3600,
+        timeout=5000
     )
     if proc.returncode != 0:
         raise RuntimeError(f"shell error (rc={proc.returncode}): {proc.stderr[:500]}")
@@ -23,7 +23,7 @@ def run_compact(compact_bin, db):
         [compact_bin, db],
         capture_output=True,
         text=True,
-        timeout=3600,
+        timeout=5000
     )
     return proc.stderr
 
@@ -239,8 +239,9 @@ def main():
                         help="Directory containing 4kb/, 16kb/, ... with sqlite3")
     parser.add_argument("--db-dir", type=str, default="/mnt/nvme0")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
-    parser.add_argument("--compact", action="store_true",
-                        help="Run compact_db after each batch (sqlite4 only)")
+    parser.add_argument("--auto-compact", type=int, default=0, choices=[0, 1],
+                        help="0: use compact_db after each batch (autowork=0), "
+                             "1: skip compact_db (autowork=1 handles it)")
     args = parser.parse_args()
 
     page_sizes_kb = [int(x) for x in args.page_sizes.split(",")]
@@ -288,7 +289,8 @@ def main():
 
     print(f"Datasets: {', '.join(n for n, _, _ in datasets)}")
     print(f"Configs:  {', '.join(l for l, _, _, _ in configs)}")
-    print(f"Compact:  {'ON' if args.compact else 'OFF'}")
+    auto_compact = bool(args.auto_compact)
+    print(f"Auto-compact: {'ON (no compact_db)' if auto_compact else 'OFF (use compact_db)'}")
     print(f"DB dir:   {args.db_dir}")
     print(f"Total runs: {len(datasets) * len(configs)}")
 
@@ -307,7 +309,7 @@ def main():
             results = run_incremental(
                 run_label, shell, compact_bin, insert_sql, query_sql,
                 args.k, args.db_dir, distance_func=dist_func,
-                is_sqlite3=is_s3, do_compact=args.compact
+                is_sqlite3=is_s3, do_compact=not auto_compact
             )
             all_results[run_label] = results
 
