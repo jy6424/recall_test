@@ -3,6 +3,7 @@ import argparse
 import os
 import time
 import re
+import numpy as np
 
 
 def run_shell(shell, db, sql_input):
@@ -11,7 +12,6 @@ def run_shell(shell, db, sql_input):
         input=sql_input,
         capture_output=True,
         text=True,
-        timeout=20000,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"shell error (rc={proc.returncode}): {proc.stderr[:500]}")
@@ -23,7 +23,6 @@ def run_compact(compact_bin, db):
         [compact_bin, db],
         capture_output=True,
         text=True,
-        timeout=20000,
     )
     return proc.stderr
 
@@ -62,33 +61,75 @@ def parse_insert_sql(sql_path):
     return schema, inserts
 
 
-def parse_query_sql(sql_path, distance_func="vector_distance_cos"):
-    """Extract query lines (SELECT ... vector_top_k ...) from query SQL.
-    Returns list of (ann_query, bf_query) tuples."""
-    queries = []
+def parse_query_sql(sql_path):
+    """Extract ANN query lines and query vectors from query SQL.
+    Returns (ann_queries: list[str], query_vecs: np.ndarray)."""
+    ann_queries = []
+    query_vecs = []
     with open(sql_path) as f:
         for line in f:
             stripped = line.strip()
             if not stripped or stripped.upper().startswith("PRAGMA"):
                 continue
-            # Match: SELECT ... FROM vector_top_k('idx', vector('...'), K)
             m = re.search(
-                r"FROM\s+vector_top_k\(\s*'(\w+)'\s*,\s*(vector\('[^']*'\))\s*,\s*(\d+)\s*\)",
+                r"FROM\s+vector_top_k\(\s*'(\w+)'\s*,\s*vector\('\[([^\]]+)\]'\)\s*,\s*(\d+)\s*\)",
                 stripped, re.IGNORECASE
             )
             if m:
-                vec_expr = m.group(2)
-                k = m.group(3)
-                ann_q = stripped
-                bf_q = f"SELECT id FROM x ORDER BY {distance_func}(embedding, {vec_expr}) LIMIT {k};"
-                queries.append((ann_q, bf_q))
-    return queries
+                ann_queries.append(stripped)
+                vec = np.array([float(x) for x in m.group(2).split(",")], dtype=np.float32)
+                query_vecs.append(vec)
+    return ann_queries, np.array(query_vecs) if query_vecs else np.empty((0, 0))
 
 
-# Dataset name -> distance function
-DISTANCE_FUNCS = {
-    "glove": "vector_distance_cos",
-    "sift": "vector_distance_l2",
+def parse_insert_vectors(insert_sql_path):
+    """Parse INSERT SQL to extract IDs and vectors as numpy arrays."""
+    ids = []
+    vectors = []
+    with open(insert_sql_path) as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped.upper().startswith("INSERT"):
+                continue
+            m_id = re.search(r"VALUES\s*\(\s*(\d+)\s*,", stripped)
+            if not m_id:
+                continue
+            m_vec = re.search(r"vector\('\[([^\]]+)\]'\)", stripped)
+            if not m_vec:
+                continue
+            ids.append(int(m_id.group(1)))
+            vectors.append(np.array([float(x) for x in m_vec.group(1).split(",")], dtype=np.float32))
+    return np.array(ids), np.array(vectors)
+
+
+def compute_groundtruth_cosine(data_vecs, query_vecs, k):
+    """Exact top-k using cosine distance (numpy)."""
+    d_norm = data_vecs / np.maximum(np.linalg.norm(data_vecs, axis=1, keepdims=True), 1e-10)
+    q_norm = query_vecs / np.maximum(np.linalg.norm(query_vecs, axis=1, keepdims=True), 1e-10)
+    sims = q_norm @ d_norm.T
+    topk = np.argpartition(-sims, k, axis=1)[:, :k]
+    for i in range(len(topk)):
+        order = np.argsort(-sims[i, topk[i]])
+        topk[i] = topk[i][order]
+    return topk
+
+
+def compute_groundtruth_l2(data_vecs, query_vecs, k):
+    """Exact top-k using L2 distance (numpy)."""
+    q_sq = np.sum(query_vecs ** 2, axis=1, keepdims=True)
+    d_sq = np.sum(data_vecs ** 2, axis=1, keepdims=True).T
+    dists = q_sq + d_sq - 2 * (query_vecs @ data_vecs.T)
+    topk = np.argpartition(dists, k, axis=1)[:, :k]
+    for i in range(len(topk)):
+        order = np.argsort(dists[i, topk[i]])
+        topk[i] = topk[i][order]
+    return topk
+
+
+# Dataset name -> distance type
+DISTANCE_TYPES = {
+    "glove": "cosine",
+    "sift": "l2",
 }
 
 
@@ -123,8 +164,8 @@ def compute_recall(ann_results, bf_results, k):
 
 
 def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
-                    k, db_dir, distance_func="vector_distance_cos", is_sqlite3=False,
-                    do_compact=False):
+                    all_ids, all_vecs, query_vecs, k, db_dir,
+                    distance_type="cosine", is_sqlite3=False, do_compact=False):
     """Run incremental insert experiment for one config."""
 
     db_path = os.path.join(db_dir, f"incr_{label}.db")
@@ -132,9 +173,9 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
 
     # Parse files
     schema, inserts = parse_insert_sql(insert_sql_path)
-    queries = parse_query_sql(query_sql_path, distance_func)
+    ann_queries, _ = parse_query_sql(query_sql_path)
     n_total = len(inserts)
-    n_queries = len(queries)
+    n_queries = len(ann_queries)
 
     print(f"\n{'='*70}")
     print(f"  Config: {label}")
@@ -155,9 +196,8 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
     run_shell(shell, db_path, schema_sql)
     print(f"  Schema created")
 
-    # Build query strings
-    ann_sql = "\n".join(q[0] for q in queries) + "\n"
-    bf_sql = "\n".join(q[1] for q in queries) + "\n"
+    # Build ANN query string
+    ann_sql = "\n".join(ann_queries) + "\n"
 
     results = []
     inserted_so_far = 0
@@ -195,16 +235,20 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
         ann_qps = n_queries / t_ann if t_ann > 0 else 0
         print(f"  ANN:     {t_ann:.2f}s ({ann_qps:.0f} q/s)")
 
-        # Brute-force query
+        # Compute groundtruth with numpy
         t0 = time.time()
-        bf_out = run_shell(shell, db_path, bf_sql)
-        t_bf = time.time() - t0
-        bf_results = parse_output_to_results(bf_out, k)
-        bf_qps = n_queries / t_bf if t_bf > 0 else 0
-        print(f"  BF:      {t_bf:.2f}s ({bf_qps:.0f} q/s)")
+        data_ids = all_ids[:inserted_so_far]
+        data_vecs = all_vecs[:inserted_so_far]
+        if distance_type == "cosine":
+            gt_idx = compute_groundtruth_cosine(data_vecs, query_vecs, k)
+        else:
+            gt_idx = compute_groundtruth_l2(data_vecs, query_vecs, k)
+        gt_results = [set(int(data_ids[j]) for j in gt_idx[i]) for i in range(len(query_vecs))]
+        t_gt = time.time() - t0
+        print(f"  GT(np):  {t_gt:.2f}s ({n_queries} queries, numpy {distance_type})")
 
         # Recall
-        recall = compute_recall(ann_results, bf_results, k)
+        recall = compute_recall(ann_results, gt_results, k)
         print(f"  Recall@{k}: {recall:.4f} ({recall*100:.2f}%)")
         print(f"  DB size: {db_size:.1f} MB")
 
@@ -216,7 +260,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             "insert_s": round(t_insert, 2),
             "compact_s": round(t_compact, 2),
             "ann_qps": round(ann_qps, 1),
-            "bf_qps": round(bf_qps, 1),
+            "gt_s": round(t_gt, 2),
             "recall": round(recall, 4),
             "db_mb": round(db_size, 1),
         })
@@ -233,9 +277,9 @@ def main():
     parser.add_argument("--datasets", type=str, default="glove,sift",
                         help="Comma-separated dataset names (default: glove,sift)")
     parser.add_argument("--k", type=int, default=10)
-    parser.add_argument("--sqlite4-dir", type=str, default="sqlite4_lsm",
+    parser.add_argument("--sqlite4-dir", type=str, default="./sqlite4_lsm",
                         help="Directory containing 4kb/, 16kb/, ... with sqlite4 + compact_db")
-    parser.add_argument("--sqlite3-dir", type=str, default="sqlite3_libsql",
+    parser.add_argument("--sqlite3-dir", type=str, default="./sqlite3_libsql",
                         help="Directory containing 4kb/, 16kb/, ... with sqlite3")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
@@ -301,14 +345,25 @@ def main():
         print(f"  DATASET: {ds_name}")
         print(f"{'#'*70}")
 
-        dist_func = DISTANCE_FUNCS.get(ds_name, "vector_distance_cos")
-        print(f"  Distance function: {dist_func}")
+        dist_type = DISTANCE_TYPES.get(ds_name, "cosine")
+        print(f"  Distance type: {dist_type}")
+
+        # Parse vectors once per dataset (shared across configs)
+        print(f"  Parsing insert vectors...")
+        t0 = time.time()
+        all_ids, all_vecs = parse_insert_vectors(insert_sql)
+        print(f"  Parsed {len(all_ids)} vectors ({all_vecs.shape[1]}-dim) in {time.time()-t0:.1f}s")
+
+        print(f"  Parsing query vectors...")
+        _, query_vecs = parse_query_sql(query_sql)
+        print(f"  Parsed {len(query_vecs)} query vectors")
 
         for label, shell, compact_bin, is_s3 in configs:
             run_label = f"{ds_name}_{label}"
             results = run_incremental(
                 run_label, shell, compact_bin, insert_sql, query_sql,
-                args.k, args.db_dir, distance_func=dist_func,
+                all_ids, all_vecs, query_vecs,
+                args.k, args.db_dir, distance_type=dist_type,
                 is_sqlite3=is_s3, do_compact=not auto_compact
             )
             all_results[run_label] = results
@@ -319,17 +374,17 @@ def main():
         print(f"  {run_label} — Incremental Results (k={args.k})")
         print(f"{'='*90}")
         print(f"{'Batch':>6} {'Rows':>8} {'Total':>8} {'%':>5} "
-              f"{'Insert':>8} {'Compact':>8} {'ANN':>8} {'BF':>8} "
+              f"{'Insert':>8} {'Compact':>8} {'ANN':>8} {'GT':>8} "
               f"{'Recall':>8} {'DB':>8}")
         print(f"{'':>6} {'added':>8} {'rows':>8} {'':>5} "
-              f"{'(s)':>8} {'(s)':>8} {'(q/s)':>8} {'(q/s)':>8} "
+              f"{'(s)':>8} {'(s)':>8} {'(q/s)':>8} {'(s)':>8} "
               f"{'@k':>8} {'(MB)':>8}")
         print(f"{'-'*90}")
         for r in results:
             compact_str = f"{r['compact_s']:>8.1f}" if r['compact_s'] > 0 else f"{'---':>8}"
             print(f"{r['batch']:>6} {r['rows_added']:>8} {r['total_rows']:>8} "
                   f"{r['pct']:>4}% {r['insert_s']:>8.1f} "
-                  f"{compact_str} {r['ann_qps']:>8.0f} {r['bf_qps']:>8.0f} "
+                  f"{compact_str} {r['ann_qps']:>8.0f} {r['gt_s']:>8.1f} "
                   f"{r['recall']:>8.4f} {r['db_mb']:>8.1f}")
         print(f"{'='*90}")
 
