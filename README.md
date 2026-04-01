@@ -43,7 +43,7 @@ make -j
     `LSM_CONFIG_AUTOWORK = 1` 로 빌드했을 때 
 
     ```
-    python3 recall_test.py --auto-compact 0
+    python3 recall_test.py --auto-compact 1
     ```
 
     `LSM_CONFIG_AUTOWORK = 0` 으로 빌드했을 때 
