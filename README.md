@@ -36,7 +36,7 @@ make -j
 `incremental_test.py` : sqlite 데이터 각각에 대해 50% 빌드 후 10% 씩 incremental 하게 빌드하는 코드
 
 ### 테스트 코드 돌리는 법
-
+0. numpy 설치된 파이썬 환경 준비
 1. 각 sqlite 실행코드 및 sqlite4의 compact_db 코드 컴파일
 2. `recall_test.py`
     
