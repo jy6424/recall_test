@@ -5401,13 +5401,13 @@ int lsm_reclaim(lsm_db *pDb, int nKB, int *pnWrite){
       }else{
         nNewBlock = pWorker->nBlock;
       }
-      /* Remove freelist entries that are no longer needed:
-      ** - blocks beyond nNewBlock (truncated away)
-      ** - entries with iId<0 (consumed allocations, stale)
-      ** This also prevents freelist overflow (nMaxFreelist) which would
-      ** trigger sortedNewFreelistOnly and allocate blocks past nNewBlock. */
+      /* Remove freelist entries for blocks beyond nNewBlock (truncated away).
+      ** Keep iId<0 entries (consumed-block markers) for blocks <= nNewBlock:
+      ** these suppress stale on-disk freelist entries that still say those
+      ** blocks are free. Without them, a subsequent lsm_reclaim would
+      ** reallocate blocks that already contain live moved data. */
       for(i=j=0; i<pFL->nEntry; i++){
-        if( (int)pFL->aEntry[i].iBlk<=nNewBlock && pFL->aEntry[i].iId>=0 ){
+        if( (int)pFL->aEntry[i].iBlk<=nNewBlock ){
           pFL->aEntry[j++] = pFL->aEntry[i];
         }
       }
