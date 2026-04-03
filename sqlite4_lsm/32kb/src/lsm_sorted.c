@@ -5372,6 +5372,21 @@ int lsm_reclaim(lsm_db *pDb, int nKB, int *pnWrite){
   rc = lsmBeginWork(pDb);
   if( rc!=LSM_OK ) goto reclaim_out;
 
+  /* sortedMoveBlock creates a redirect array shared by ALL segments.
+  ** lsmFsSortedDelete clears the ENTIRE redirect when ANY segment is
+  ** deleted. So block moves are only safe when all data is in a single
+  ** level — otherwise a future merge on one level would clear the redirect
+  ** while other levels still need it, causing SIGBUS on truncated blocks. */
+  {
+    Level *pTop = lsmDbSnapshotLevel(pDb->pWorker);
+    if( pTop==0 || pTop->pNext!=0 ){
+      /* Multiple levels exist — cannot safely move blocks. */
+      int rcdummy = LSM_BUSY;
+      lsmFinishWork(pDb, 0, &rcdummy);
+      goto reclaim_out;
+    }
+  }
+
   /* Move blocks until redirect array is full or no more work */
   while( rc==LSM_OK ){
     int nDone = 0;

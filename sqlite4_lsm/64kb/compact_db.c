@@ -47,7 +47,8 @@ int main(int argc, char **argv){
     lsm_free(pEnv, zInfo);
   }
 
-  fprintf(stderr, "Compacting %s\n", argv[1]);
+  /* Phase 1: Merge with nMerge=4 to do bulk merge work */
+  fprintf(stderr, "Compacting %s (phase 1: merge)\n", argv[1]);
   do {
     rc = lsm_work(pDb, 4, 4096, &nWritten);
     if( rc != 0 ){
@@ -60,7 +61,27 @@ int main(int argc, char **argv){
     }
   } while( nWritten > 0 );
 
-  fprintf(stderr, "Merge done. Total: %d KB written.\n", nTotal);
+  fprintf(stderr, "Phase 1 done. Total: %d KB written.\n", nTotal);
+
+  /* Phase 2: Compact to single segment with nMerge=1.
+  ** This is required before lsm_reclaim can safely move blocks,
+  ** because the redirect array is shared across ALL segments. */
+  if( rc == 0 ){
+    fprintf(stderr, "Phase 2: compact to single segment\n");
+    nTotal = 0;
+    do {
+      rc = lsm_work(pDb, 1, 4096, &nWritten);
+      if( rc != 0 ){
+        fprintf(stderr, "lsm_work(nMerge=1) failed: %d\n", rc);
+        break;
+      }
+      nTotal += nWritten;
+      if( nWritten > 0 ){
+        fprintf(stderr, "  %d KB written so far\n", nTotal);
+      }
+    } while( nWritten > 0 );
+    fprintf(stderr, "Phase 2 done. Total: %d KB written.\n", nTotal);
+  }
 
   /* Show DB structure after merge */
   {
