@@ -22,10 +22,11 @@ def run_shell(shell, db, sql_input):
 def run_compact(compact_bin, db):
     proc = subprocess.run(
         [compact_bin, db],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=None,  # stderr goes directly to terminal
         text=True,
     )
-    return proc.stderr
+    return ""
 
 
 def file_size_mb(path):
@@ -223,10 +224,12 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
         # Compact (sqlite4 only, if enabled)
         t_compact = 0.0
         if need_compact:
+            size_before = file_size_mb(db_path)
             t0 = time.time()
             run_compact(compact_bin, db_path)
             t_compact = time.time() - t0
-            print(f"  Compact: {t_compact:.1f}s")
+            size_after = file_size_mb(db_path)
+            print(f"  Compact: {t_compact:.1f}s ({size_before:.1f} -> {size_after:.1f} MB)")
 
         db_size = file_size_mb(db_path)
 

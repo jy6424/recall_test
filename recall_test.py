@@ -21,11 +21,12 @@ def run_shell(shell, db, sql_input):
 def run_compact(compact_bin, db):
     proc = subprocess.run(
         [compact_bin, db],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=None,  # stderr goes directly to terminal
         text=True,
         timeout=20000,
     )
-    return proc.stderr
+    return ""
 
 
 def read_sql(sql_path):
