@@ -418,10 +418,7 @@ def main():
         _, query_vecs = parse_query_sql(query_sql)
         print(f"  Parsed {len(query_vecs)} query vectors")
 
-        lsm_configs = [(l, s, c, f) for l, s, c, f in configs if not f]
-        s3_configs  = [(l, s, c, f) for l, s, c, f in configs if f]
-
-        for label, shell, compact_bin, is_s3 in lsm_configs:
+        for label, shell, compact_bin, is_s3 in configs:
             run_label = f"{ds_name}_{label}"
             results = run_incremental(
                 run_label, shell, compact_bin, insert_sql, query_sql,
@@ -431,22 +428,10 @@ def main():
             )
             all_results[run_label] = results
 
-        # Clean up LSM DB files before sqlite3 runs to free disk space
-        if lsm_configs and s3_configs:
-            for label, _, _, _ in lsm_configs:
-                db_path = os.path.join(args.db_dir, f"incr_{ds_name}_{label}.db")
-                cleanup_db(db_path, is_sqlite3=False)
-            print(f"\n  Cleaned up LSM DB files to free disk space")
-
-        for label, shell, compact_bin, is_s3 in s3_configs:
-            run_label = f"{ds_name}_{label}"
-            results = run_incremental(
-                run_label, shell, compact_bin, insert_sql, query_sql,
-                all_ids, all_vecs, query_vecs,
-                args.k, args.db_dir, distance_type=dist_type,
-                is_sqlite3=is_s3, do_compact=not auto_compact
-            )
-            all_results[run_label] = results
+            # Clean up DB after results are recorded to free disk space
+            db_path = os.path.join(args.db_dir, f"incr_{run_label}.db")
+            cleanup_db(db_path, is_sqlite3=is_s3)
+            print(f"  Cleaned up {db_path}")
 
     # Summary per config
     for run_label, results in all_results.items():
