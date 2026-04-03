@@ -3,73 +3,20 @@ import argparse
 import os
 import time
 import re
-import threading
 import numpy as np
 
 
-class ShellSession:
-    """Persistent shell process — keeps one DB connection open across phases."""
-
-    def __init__(self, shell, db):
-        self.proc = subprocess.Popen(
-            [shell, db],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        self._stderr_lines = []
-        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
-        self._stderr_thread.start()
-
-    def _drain_stderr(self):
-        try:
-            for line in self.proc.stderr:
-                self._stderr_lines.append(line)
-        except (OSError, ValueError):
-            pass
-
-    def execute(self, sql):
-        """Send SQL to shell, return stdout up to end marker."""
-        marker = "__SQLDONE__"
-        full_sql = sql.rstrip("\n") + f"\nSELECT '{marker}';\n"
-
-        def writer():
-            try:
-                self.proc.stdin.write(full_sql)
-                self.proc.stdin.flush()
-            except (BrokenPipeError, OSError):
-                pass
-
-        wt = threading.Thread(target=writer)
-        wt.start()
-
-        lines = []
-        found = False
-        for line in self.proc.stdout:
-            if marker in line:
-                found = True
-                break
-            lines.append(line)
-        wt.join()
-
-        if not found:
-            stderr = "".join(self._stderr_lines)
-            rc = self.proc.poll()
-            raise RuntimeError(f"shell died (rc={rc}): {stderr[:500]}")
-
-        return "".join(lines)
-
-    def close(self):
-        try:
-            self.proc.stdin.close()
-        except OSError:
-            pass
-        self.proc.wait(timeout=60)
-        self._stderr_thread.join(timeout=5)
-
-    def get_stderr(self):
-        return "".join(self._stderr_lines)
+def run_shell(shell, db, sql_input):
+    """Run SQL through shell in one session."""
+    proc = subprocess.run(
+        [shell, db],
+        input=sql_input,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"shell error (rc={proc.returncode}): {proc.stderr[:500]}")
+    return proc.stdout
 
 
 def run_compact(compact_bin, db):
@@ -249,8 +196,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
 
     # Create schema (not timed)
     schema_sql = "\n".join(schema)
-    session = ShellSession(shell, db_path)
-    session.execute(schema_sql)
+    run_shell(shell, db_path, schema_sql)
     print(f"  Schema created")
 
     # Build ANN query string
@@ -267,28 +213,26 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
         print(f"\n  --- Batch {batch_idx+1}: +{batch_size} rows "
               f"(total: {inserted_so_far}/{n_total}, {pct}%) ---")
 
-        # Insert batch (timed — same connection)
+        # Insert batch (timed)
         batch_sql = "\n".join(batch_inserts)
         t0 = time.time()
-        session.execute(batch_sql)
+        run_shell(shell, db_path, batch_sql)
         t_insert = time.time() - t0
         print(f"  Insert:  {t_insert:.1f}s ({batch_size} rows)")
 
-        # Compact: must close session, run compact_db, reopen
+        # Compact (sqlite4 only, if enabled)
         t_compact = 0.0
         if need_compact:
-            session.close()
             t0 = time.time()
             run_compact(compact_bin, db_path)
             t_compact = time.time() - t0
             print(f"  Compact: {t_compact:.1f}s")
-            session = ShellSession(shell, db_path)
 
         db_size = file_size_mb(db_path)
 
-        # ANN query (timed — same connection, no process spawn)
+        # ANN query (timed)
         t0 = time.time()
-        ann_out = session.execute(ann_sql)
+        ann_out = run_shell(shell, db_path, ann_sql)
         t_ann = time.time() - t0
         ann_results = parse_output_to_results(ann_out, k)
         ann_qps = n_queries / t_ann if t_ann > 0 else 0
@@ -324,7 +268,6 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             "db_mb": round(db_size, 1),
         })
 
-    session.close()
     return results
 
 
