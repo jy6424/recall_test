@@ -3,19 +3,73 @@ import argparse
 import os
 import time
 import re
+import threading
 import numpy as np
 
 
-def run_shell(shell, db, sql_input):
-    proc = subprocess.run(
-        [shell, db],
-        input=sql_input,
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"shell error (rc={proc.returncode}): {proc.stderr[:500]}")
-    return proc.stdout
+class ShellSession:
+    """Persistent shell process — keeps one DB connection open across phases."""
+
+    def __init__(self, shell, db):
+        self.proc = subprocess.Popen(
+            [shell, db],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self._stderr_lines = []
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
+
+    def _drain_stderr(self):
+        try:
+            for line in self.proc.stderr:
+                self._stderr_lines.append(line)
+        except (OSError, ValueError):
+            pass
+
+    def execute(self, sql):
+        """Send SQL to shell, return stdout up to end marker."""
+        marker = "__SQLDONE__"
+        full_sql = sql.rstrip("\n") + f"\nSELECT '{marker}';\n"
+
+        def writer():
+            try:
+                self.proc.stdin.write(full_sql)
+                self.proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+
+        wt = threading.Thread(target=writer)
+        wt.start()
+
+        lines = []
+        found = False
+        for line in self.proc.stdout:
+            if marker in line:
+                found = True
+                break
+            lines.append(line)
+        wt.join()
+
+        if not found:
+            stderr = "".join(self._stderr_lines)
+            rc = self.proc.poll()
+            raise RuntimeError(f"shell died (rc={rc}): {stderr[:500]}")
+
+        return "".join(lines)
+
+    def close(self):
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        self.proc.wait(timeout=60)
+        self._stderr_thread.join(timeout=5)
+
+    def get_stderr(self):
+        return "".join(self._stderr_lines)
 
 
 def run_compact(compact_bin, db):
@@ -177,10 +231,12 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
     n_total = len(inserts)
     n_queries = len(ann_queries)
 
+    need_compact = do_compact and compact_bin and not is_sqlite3
+
     print(f"\n{'='*70}")
     print(f"  Config: {label}")
     print(f"  Shell:   {shell}")
-    if do_compact and compact_bin:
+    if need_compact:
         print(f"  Compact: {compact_bin}")
     print(f"  Total inserts: {n_total}, Queries: {n_queries}, k={k}")
     print(f"{'='*70}")
@@ -191,13 +247,14 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
     n_batch = n_remaining // 5
     batches = [n_first] + [n_batch] * 4 + [n_remaining - n_batch * 4]
 
-    # Create schema
-    schema_sql = "\n".join(schema) + "\n"
-    run_shell(shell, db_path, schema_sql)
+    # Create schema (not timed)
+    schema_sql = "\n".join(schema)
+    session = ShellSession(shell, db_path)
+    session.execute(schema_sql)
     print(f"  Schema created")
 
     # Build ANN query string
-    ann_sql = "\n".join(ann_queries) + "\n"
+    ann_sql = "\n".join(ann_queries)
 
     results = []
     inserted_so_far = 0
@@ -210,26 +267,28 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
         print(f"\n  --- Batch {batch_idx+1}: +{batch_size} rows "
               f"(total: {inserted_so_far}/{n_total}, {pct}%) ---")
 
-        # Insert batch
-        batch_sql = "\n".join(batch_inserts) + "\n"
+        # Insert batch (timed — same connection)
+        batch_sql = "\n".join(batch_inserts)
         t0 = time.time()
-        run_shell(shell, db_path, batch_sql)
+        session.execute(batch_sql)
         t_insert = time.time() - t0
         print(f"  Insert:  {t_insert:.1f}s ({batch_size} rows)")
 
-        # Compact (sqlite4 only, if enabled)
+        # Compact: must close session, run compact_db, reopen
         t_compact = 0.0
-        if do_compact and compact_bin and not is_sqlite3:
+        if need_compact:
+            session.close()
             t0 = time.time()
             run_compact(compact_bin, db_path)
             t_compact = time.time() - t0
             print(f"  Compact: {t_compact:.1f}s")
+            session = ShellSession(shell, db_path)
 
         db_size = file_size_mb(db_path)
 
-        # ANN query
+        # ANN query (timed — same connection, no process spawn)
         t0 = time.time()
-        ann_out = run_shell(shell, db_path, ann_sql)
+        ann_out = session.execute(ann_sql)
         t_ann = time.time() - t0
         ann_results = parse_output_to_results(ann_out, k)
         ann_qps = n_queries / t_ann if t_ann > 0 else 0
@@ -265,6 +324,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             "db_mb": round(db_size, 1),
         })
 
+    session.close()
     return results
 
 
@@ -358,7 +418,27 @@ def main():
         _, query_vecs = parse_query_sql(query_sql)
         print(f"  Parsed {len(query_vecs)} query vectors")
 
-        for label, shell, compact_bin, is_s3 in configs:
+        lsm_configs = [(l, s, c, f) for l, s, c, f in configs if not f]
+        s3_configs  = [(l, s, c, f) for l, s, c, f in configs if f]
+
+        for label, shell, compact_bin, is_s3 in lsm_configs:
+            run_label = f"{ds_name}_{label}"
+            results = run_incremental(
+                run_label, shell, compact_bin, insert_sql, query_sql,
+                all_ids, all_vecs, query_vecs,
+                args.k, args.db_dir, distance_type=dist_type,
+                is_sqlite3=is_s3, do_compact=not auto_compact
+            )
+            all_results[run_label] = results
+
+        # Clean up LSM DB files before sqlite3 runs to free disk space
+        if lsm_configs and s3_configs:
+            for label, _, _, _ in lsm_configs:
+                db_path = os.path.join(args.db_dir, f"incr_{ds_name}_{label}.db")
+                cleanup_db(db_path, is_sqlite3=False)
+            print(f"\n  Cleaned up LSM DB files to free disk space")
+
+        for label, shell, compact_bin, is_s3 in s3_configs:
             run_label = f"{ds_name}_{label}"
             results = run_incremental(
                 run_label, shell, compact_bin, insert_sql, query_sql,
