@@ -50,6 +50,21 @@ static double g_p1PruneMs;
 static long long g_searchEdgesTotal;
 static int g_searchVisitedTotal;
 
+// Query-level stats
+static double g_queryDistanceMs = 0.0;
+static long long g_queryDistanceCalls = 0;
+
+static long long g_queryCount = 0;
+static double g_queryTotalMs = 0.0;
+static double g_queryGraphMs = 0.0;
+static double g_queryResultMs = 0.0;
+
+static double g_queryKvReadMs = 0.0;
+static long long g_queryKvReads = 0;
+
+static long long g_queryNodesVisited = 0;
+static long long g_queryEdgesExamined = 0;
+
 // #define SQLITE4_VECTOR_TRACE
 #if defined(SQLITE4_DEBUG) && defined(SQLITE4_VECTOR_TRACE)
 #define DiskAnnTrace(X) sqlite4DebugPrintf X;
