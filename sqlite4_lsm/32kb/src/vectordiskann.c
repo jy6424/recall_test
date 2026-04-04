@@ -1075,17 +1075,33 @@ void bufferDelete(u8 *aBuffer, int nSize, int iDelete, int nItemSize) {
 ** DiskANN internals
 **************************************************************************/
 
+static int g_distTimingEnabled = 0;  /* only enabled during search queries */
+
 static float diskAnnVectorDistance(const DiskAnnIndex *pIndex, const Vector *pVec1, const Vector *pVec2){
+  float result;
+  struct timespec _d0, _d1;
+  if( g_distTimingEnabled ){
+    clock_gettime(CLOCK_MONOTONIC, &_d0);
+  }
   switch( pIndex->nDistanceFunc ){
     case VECTOR_METRIC_TYPE_COS:
-      return vectorDistanceCos(pVec1, pVec2);
+      result = vectorDistanceCos(pVec1, pVec2);
+      break;
     case VECTOR_METRIC_TYPE_L2:
-      return vectorDistanceL2(pVec1, pVec2);
+      result = vectorDistanceL2(pVec1, pVec2);
+      break;
     default:
       assert(0);
-    break;
+      result = 0.0;
+      break;
   }
-  return 0.0;
+  if( g_distTimingEnabled ){
+    clock_gettime(CLOCK_MONOTONIC, &_d1);
+    g_queryDistanceMs += (_d1.tv_sec - _d0.tv_sec)*1000.0
+                       + (_d1.tv_nsec - _d0.tv_nsec)/1e6;
+    g_queryDistanceCalls++;
+  }
+  return result;
 }
 
 static DiskAnnNode *diskAnnNodeAlloc(const DiskAnnIndex *pIndex, u64 nRowid){
@@ -1498,6 +1514,11 @@ int diskAnnSearch(
   u64 nStartRowid;
   int nOutRows;
   int i;
+  struct timespec _q0, _q1, _qg0, _qg1, _qr0, _qr1;
+  double kvReadBefore, kvReadAfter;
+  int kvReadCountBefore, kvReadCountAfter;
+  int visitedBefore, visitedAfter;
+  long long edgesBefore, edgesAfter;
 
   DiskAnnTrace(("diskAnnSearch started\n"));
 
@@ -1514,6 +1535,14 @@ int diskAnnSearch(
     return SQLITE4_ERROR;
   }
 
+  clock_gettime(CLOCK_MONOTONIC, &_q0);
+
+  /* Snapshot counters before search to isolate search-only I/O */
+  kvReadBefore = g_totalKvReadMs;
+  kvReadCountBefore = pIndex->nReads;
+  visitedBefore = g_searchVisitedTotal;
+  edgesBefore = g_searchEdgesTotal;
+
   rc = diskAnnSelectRandomShadowRow(pIndex, &nStartRowid);
   if( rc == SQLITE4_DONE ){
     pRows->nRows = 0;
@@ -1528,10 +1557,19 @@ int diskAnnSearch(
     *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(search): failed to initialize search context");
     goto out;
   }
+
+  /* Graph traversal (timed) */
+  clock_gettime(CLOCK_MONOTONIC, &_qg0);
+  g_distTimingEnabled = 1;
   rc = diskAnnSearchInternal(pIndex, &ctx, nStartRowid, pzErrMsg);
+  g_distTimingEnabled = 0;
+  clock_gettime(CLOCK_MONOTONIC, &_qg1);
   if( rc != SQLITE4_OK ){
     goto out;
   }
+
+  /* Result collection (timed) */
+  clock_gettime(CLOCK_MONOTONIC, &_qr0);
   nOutRows = MIN(k, ctx.nTopCandidates);
   rc = vectorOutRowsAlloc(pIndex->db, pRows, nOutRows, pKey->nKeyColumns, vectorIdxKeyRowidLike(pKey));
   if( rc != SQLITE4_OK ){
@@ -1549,8 +1587,31 @@ int diskAnnSearch(
       goto out;
     }
   }
+  clock_gettime(CLOCK_MONOTONIC, &_qr1);
+
+  /* Accumulate search stats */
+  kvReadAfter = g_totalKvReadMs;
+  kvReadCountAfter = pIndex->nReads;
+  visitedAfter = g_searchVisitedTotal;
+  edgesAfter = g_searchEdgesTotal;
+
+  g_queryCount++;
+  {
+    double totalMs = (_qr1.tv_sec - _q0.tv_sec)*1000.0 + (_qr1.tv_nsec - _q0.tv_nsec)/1e6;
+    double graphMs = (_qg1.tv_sec - _qg0.tv_sec)*1000.0 + (_qg1.tv_nsec - _qg0.tv_nsec)/1e6;
+    double resultMs = (_qr1.tv_sec - _qr0.tv_sec)*1000.0 + (_qr1.tv_nsec - _qr0.tv_nsec)/1e6;
+    g_queryTotalMs += totalMs;
+    g_queryGraphMs += graphMs;
+    g_queryResultMs += resultMs;
+    g_queryKvReadMs += (kvReadAfter - kvReadBefore);
+    g_queryKvReads += (kvReadCountAfter - kvReadCountBefore);
+    g_queryNodesVisited += (visitedAfter - visitedBefore);
+    g_queryEdgesExamined += (edgesAfter - edgesBefore);
+  }
+
   rc = SQLITE4_OK;
 out:
+  clock_gettime(CLOCK_MONOTONIC, &_q1);
   diskAnnSearchCtxDeinit(&ctx);
   return rc;
 }
@@ -1975,6 +2036,57 @@ static int g_totalReads = 0;
 static int g_totalWrites = 0;
 static int g_atexitRegistered = 0;
 
+/* Search-specific stats (accumulated across all diskAnnSearch calls) */
+static int g_queryCount = 0;
+static double g_queryTotalMs = 0;       /* total wall-clock time */
+static double g_queryGraphMs = 0;       /* graph traversal (diskAnnSearchInternal) */
+static double g_queryResultMs = 0;      /* result collection */
+static double g_queryKvReadMs = 0;      /* KV read I/O during search only */
+static int g_queryKvReads = 0;          /* KV read count during search only */
+static int g_queryNodesVisited = 0;     /* total nodes visited across all queries */
+static long long g_queryEdgesExamined = 0; /* total edges examined */
+static double g_queryDistanceMs = 0;    /* distance computation time */
+static int g_queryDistanceCalls = 0;    /* distance computation count */
+
+static void diskAnnPrintSearchStats(void){
+  if( g_queryCount > 0 ){
+    double avgTotal = g_queryTotalMs / g_queryCount;
+    double avgGraph = g_queryGraphMs / g_queryCount;
+    double avgResult = g_queryResultMs / g_queryCount;
+    double avgKvRead = g_queryKvReadMs / g_queryCount;
+    double avgDist = g_queryDistanceMs / g_queryCount;
+    double avgVisited = (double)g_queryNodesVisited / g_queryCount;
+    double avgEdges = (double)g_queryEdgesExamined / g_queryCount;
+    double avgKvCount = (double)g_queryKvReads / g_queryCount;
+    double avgDistCalls = (double)g_queryDistanceCalls / g_queryCount;
+    double qps = g_queryTotalMs > 0 ? g_queryCount / (g_queryTotalMs / 1000.0) : 0;
+    fprintf(stderr, "\n=== diskAnn search breakdown (%d queries) ===\n", g_queryCount);
+    fprintf(stderr, "  total:          %8.1f ms  (avg %.3f ms/q, %.0f q/s)\n",
+            g_queryTotalMs, avgTotal, qps);
+    fprintf(stderr, "  graph traversal:%8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
+            g_queryGraphMs, avgGraph, g_queryGraphMs/g_queryTotalMs*100);
+    fprintf(stderr, "    KV read I/O:  %8.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
+            g_queryKvReadMs, avgKvRead,
+            g_queryGraphMs > 0 ? g_queryKvReadMs/g_queryGraphMs*100 : 0);
+    fprintf(stderr, "    distance:     %8.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
+            g_queryDistanceMs, avgDist,
+            g_queryGraphMs > 0 ? g_queryDistanceMs/g_queryGraphMs*100 : 0);
+    fprintf(stderr, "  result collect: %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
+            g_queryResultMs, avgResult, g_queryResultMs/g_queryTotalMs*100);
+    fprintf(stderr, "  KV reads: %d total (avg %.1f/q, avg %.4f ms/read)\n",
+            g_queryKvReads, avgKvCount,
+            g_queryKvReads > 0 ? g_queryKvReadMs / g_queryKvReads : 0);
+    fprintf(stderr, "  nodes visited: %d total (avg %.1f/q)\n",
+            g_queryNodesVisited, avgVisited);
+    fprintf(stderr, "  edges examined: %lld total (avg %.1f/q, avg %.1f edges/node)\n",
+            g_queryEdgesExamined, avgEdges,
+            g_queryNodesVisited > 0 ? (double)g_queryEdgesExamined / g_queryNodesVisited : 0);
+    fprintf(stderr, "  distance calls: %d total (avg %.1f/q)\n",
+            g_queryDistanceCalls, avgDistCalls);
+    fprintf(stderr, "================================================\n");
+  }
+}
+
 static void diskAnnPrintInsertStats(void){
   if( g_totalInsertCount > 0 ){
     double total = g_totalSearchMs + g_totalShadowInsMs + g_totalPass1Ms + g_totalPass2Ms + g_totalNewFlushMs;
@@ -2015,10 +2127,11 @@ void diskAnnCloseIndex(DiskAnnIndex *pIndex){
     g_totalReads += pIndex->nReads;
     g_totalWrites += pIndex->nWrites;
     g_totalInsertCount++;
-    if( !g_atexitRegistered ){
-      atexit(diskAnnPrintInsertStats);
-      g_atexitRegistered = 1;
-    }
+  }
+  if( !g_atexitRegistered ){
+    atexit(diskAnnPrintInsertStats);
+    atexit(diskAnnPrintSearchStats);
+    g_atexitRegistered = 1;
   }
   if( pIndex->zDbSName ){
     sqlite4DbFree(pIndex->db, pIndex->zDbSName);

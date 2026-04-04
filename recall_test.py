@@ -3,18 +3,36 @@ import argparse
 import os
 import time
 
+def run_shell_one(shell, db, sql_file):
+    """Run a SQL file through the sqlite4 shell."""
+    with open(sql_file, 'r') as f:
+        proc = subprocess.run(
+            [shell, db],
+            stdin=f,
+            capture_output=True,
+            text=True,
+        )
+    if proc.returncode != 0:
+        stdout_tail = "\n".join(proc.stdout.strip().split("\n")[-5:]) if proc.stdout else ""
+        print(f"STDERR: {proc.stderr}")
+        print(f"STDOUT (last 5 lines): {stdout_tail}")
+        raise RuntimeError(f"sqlite4 shell failed (rc={proc.returncode}) on {sql_file}")
+    return proc.stdout
 
-def run_shell(shell, db, sql_input):
+
+def run_shell(shell, db, sql_input, pass_stderr=False):
     """Run SQL through shell in one session."""
     proc = subprocess.run(
         [shell, db],
         input=sql_input,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=None if pass_stderr else subprocess.PIPE,
         text=True,
         timeout=20000,
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"shell error (rc={proc.returncode}): {proc.stderr[:500]}")
+        err = "" if pass_stderr else proc.stderr[:500]
+        raise RuntimeError(f"shell error (rc={proc.returncode}): {err}")
     return proc.stdout
 
 

@@ -6,16 +6,18 @@ import re
 import numpy as np
 
 
-def run_shell(shell, db, sql_input):
+def run_shell(shell, db, sql_input, pass_stderr=False):
     """Run SQL through shell in one session."""
     proc = subprocess.run(
         [shell, db],
         input=sql_input,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=None if pass_stderr else subprocess.PIPE,
         text=True,
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"shell error (rc={proc.returncode}): {proc.stderr[:500]}")
+        err = "" if pass_stderr else proc.stderr[:500]
+        raise RuntimeError(f"shell error (rc={proc.returncode}): {err}")
     return proc.stdout
 
 
@@ -232,7 +234,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
 
         # ANN query (timed)
         t0 = time.time()
-        ann_out = run_shell(shell, db_path, ann_sql)
+        ann_out = run_shell(shell, db_path, ann_sql, pass_stderr=True)
         t_ann = time.time() - t0
         ann_results = parse_output_to_results(ann_out, k)
         ann_qps = n_queries / t_ann if t_ann > 0 else 0
