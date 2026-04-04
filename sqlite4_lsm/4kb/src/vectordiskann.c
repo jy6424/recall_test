@@ -50,20 +50,17 @@ static double g_p1PruneMs;
 static long long g_searchEdgesTotal;
 static int g_searchVisitedTotal;
 
-// Query-level stats
-static double g_queryDistanceMs = 0.0;
-static long long g_queryDistanceCalls = 0;
-
-static long long g_queryCount = 0;
-static double g_queryTotalMs = 0.0;
-static double g_queryGraphMs = 0.0;
-static double g_queryResultMs = 0.0;
-
-static double g_queryKvReadMs = 0.0;
-static long long g_queryKvReads = 0;
-
-static long long g_queryNodesVisited = 0;
-static long long g_queryEdgesExamined = 0;
+/* Search-specific stats (accumulated across all diskAnnSearch calls) */
+static int g_queryCount = 0;
+static double g_queryTotalMs = 0;       /* total wall-clock time */
+static double g_queryGraphMs = 0;       /* graph traversal (diskAnnSearchInternal) */
+static double g_queryResultMs = 0;      /* result collection */
+static double g_queryKvReadMs = 0;      /* KV read I/O during search only */
+static int g_queryKvReads = 0;          /* KV read count during search only */
+static int g_queryNodesVisited = 0;     /* total nodes visited across all queries */
+static long long g_queryEdgesExamined = 0; /* total edges examined */
+static double g_queryDistanceMs = 0;    /* distance computation time */
+static int g_queryDistanceCalls = 0;    /* distance computation count */
 
 // #define SQLITE4_VECTOR_TRACE
 #if defined(SQLITE4_DEBUG) && defined(SQLITE4_VECTOR_TRACE)
@@ -2050,18 +2047,6 @@ static int g_totalInsertCount = 0;
 static int g_totalReads = 0;
 static int g_totalWrites = 0;
 static int g_atexitRegistered = 0;
-
-/* Search-specific stats (accumulated across all diskAnnSearch calls) */
-static int g_queryCount = 0;
-static double g_queryTotalMs = 0;       /* total wall-clock time */
-static double g_queryGraphMs = 0;       /* graph traversal (diskAnnSearchInternal) */
-static double g_queryResultMs = 0;      /* result collection */
-static double g_queryKvReadMs = 0;      /* KV read I/O during search only */
-static int g_queryKvReads = 0;          /* KV read count during search only */
-static int g_queryNodesVisited = 0;     /* total nodes visited across all queries */
-static long long g_queryEdgesExamined = 0; /* total edges examined */
-static double g_queryDistanceMs = 0;    /* distance computation time */
-static int g_queryDistanceCalls = 0;    /* distance computation count */
 
 static void diskAnnPrintSearchStats(void){
   if( g_queryCount > 0 ){
