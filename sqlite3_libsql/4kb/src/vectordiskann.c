@@ -50,8 +50,37 @@
 #ifndef SQLITE_OMIT_VECTOR
 
 #include "math.h"
+#include <time.h>
+#include <sys/time.h>
 #include "sqliteInt.h"
 #include "vectorIndexInt.h"
+
+/* Per-operation I/O timing (accumulated in blobSpot functions) */
+static double g_totalBlobReadMs;
+static double g_totalBlobWriteMs;
+static int g_searchVisitedTotal;
+static long long g_searchEdgesTotal;
+
+/* Insert stats */
+static double g_totalSearchMs;
+static double g_totalShadowInsMs;
+static double g_totalPass1Ms;
+static double g_totalPass2Ms;
+static double g_totalFlushMs;
+static int g_totalInsertCount;
+static int g_totalReads;
+static int g_totalWrites;
+static int g_atexitRegistered;
+
+/* Search-specific stats */
+static int g_queryCount;
+static double g_queryTotalMs;
+static double g_queryGraphMs;
+static double g_queryResultMs;
+static double g_queryBlobReadMs;
+static int g_queryBlobReads;
+static int g_queryNodesVisited;
+static long long g_queryEdgesExamined;
 
 // #define SQLITE_VECTOR_TRACE
 #if defined(SQLITE_DEBUG) && defined(SQLITE_VECTOR_TRACE)
@@ -225,6 +254,7 @@ out:
 
 int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, int nBufferSize) {
   int rc;
+  struct timespec _br0, _br1;
 
   DiskAnnTrace(("blob spot reload: rowid=%lld\n", nRowid));
   assert( pBlobSpot != NULL && (pBlobSpot->pBlob != NULL || pBlobSpot->isAborted ) );
@@ -233,6 +263,8 @@ int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, int nB
   if( pBlobSpot->nRowid == nRowid && pBlobSpot->isInitialized ){
     return SQLITE_OK;
   }
+
+  clock_gettime(CLOCK_MONOTONIC, &_br0);
 
   // if last blob open/reopen operation aborted - we need to close current blob and open new one
   // (as all operations over aborted blob will return SQLITE_ABORT error)
@@ -265,6 +297,11 @@ int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, int nB
   if( rc != SQLITE_OK ){
     goto abort;
   }
+
+  clock_gettime(CLOCK_MONOTONIC, &_br1);
+  g_totalBlobReadMs += (_br1.tv_sec - _br0.tv_sec)*1000.0
+                     + (_br1.tv_nsec - _br0.tv_nsec)/1e6;
+
   pIndex->nReads++;
   pBlobSpot->isInitialized = 1;
   return SQLITE_OK;
@@ -276,7 +313,13 @@ abort:
 }
 
 int blobSpotFlush(DiskAnnIndex* pIndex, BlobSpot *pBlobSpot) {
-  int rc = sqlite3_blob_write(pBlobSpot->pBlob, pBlobSpot->pBuffer, pBlobSpot->nBufferSize, 0);
+  int rc;
+  struct timespec _bw0, _bw1;
+  clock_gettime(CLOCK_MONOTONIC, &_bw0);
+  rc = sqlite3_blob_write(pBlobSpot->pBlob, pBlobSpot->pBuffer, pBlobSpot->nBufferSize, 0);
+  clock_gettime(CLOCK_MONOTONIC, &_bw1);
+  g_totalBlobWriteMs += (_bw1.tv_sec - _bw0.tv_sec)*1000.0
+                      + (_bw1.tv_nsec - _bw0.tv_nsec)/1e6;
   if( rc != SQLITE_OK ){
     return rc;
   }
@@ -955,17 +998,35 @@ void bufferDelete(u8 *aBuffer, int nSize, int iDelete, int nItemSize) {
 ** DiskANN internals
 **************************************************************************/
 
+static int g_distTimingEnabled = 0;
+static double g_queryDistanceMs = 0;
+static int g_queryDistanceCalls = 0;
+
 static float diskAnnVectorDistance(const DiskAnnIndex *pIndex, const Vector *pVec1, const Vector *pVec2){
+  float result;
+  struct timespec _d0, _d1;
+  if( g_distTimingEnabled ){
+    clock_gettime(CLOCK_MONOTONIC, &_d0);
+  }
   switch( pIndex->nDistanceFunc ){
     case VECTOR_METRIC_TYPE_COS:
-      return vectorDistanceCos(pVec1, pVec2);
+      result = vectorDistanceCos(pVec1, pVec2);
+      break;
     case VECTOR_METRIC_TYPE_L2:
-      return vectorDistanceL2(pVec1, pVec2);
+      result = vectorDistanceL2(pVec1, pVec2);
+      break;
     default:
       assert(0);
-    break;
+      result = 0.0;
+      break;
   }
-  return 0.0;
+  if( g_distTimingEnabled ){
+    clock_gettime(CLOCK_MONOTONIC, &_d1);
+    g_queryDistanceMs += (_d1.tv_sec - _d0.tv_sec)*1000.0
+                       + (_d1.tv_nsec - _d0.tv_nsec)/1e6;
+    g_queryDistanceCalls++;
+  }
+  return result;
 }
 
 static DiskAnnNode *diskAnnNodeAlloc(const DiskAnnIndex *pIndex, u64 nRowid){
@@ -1358,9 +1419,11 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
     }
 
     nVisited += 1;
+    g_searchVisitedTotal++;
     DiskAnnTrace(("visiting candidate(%d): id=%lld\n", nVisited, pCandidate->nRowid));
     nodeBinVector(pIndex, pCandidateBlob, &vCandidate);
     nEdges = nodeBinEdges(pIndex, pCandidateBlob);
+    g_searchEdgesTotal += nEdges;
 
     // if pNodeQuery != pEdgeQuery then distance from aDistances is approximate and we must recalculate it
     if( pCtx->query.pNode != pCtx->query.pEdge ){
@@ -1431,6 +1494,11 @@ int diskAnnSearch(
   u64 nStartRowid;
   int nOutRows;
   int i;
+  struct timespec _q0, _q1, _qg0, _qg1, _qr0, _qr1;
+  double blobReadBefore, blobReadAfter;
+  int blobReadCountBefore, blobReadCountAfter;
+  int visitedBefore, visitedAfter;
+  long long edgesBefore, edgesAfter;
 
   DiskAnnTrace(("diskAnnSearch started\n"));
 
@@ -1447,9 +1515,16 @@ int diskAnnSearch(
     return SQLITE_ERROR;
   }
 
+  clock_gettime(CLOCK_MONOTONIC, &_q0);
+
+  /* Snapshot counters before search */
+  blobReadBefore = g_totalBlobReadMs;
+  blobReadCountBefore = pIndex->nReads;
+  visitedBefore = g_searchVisitedTotal;
+  edgesBefore = g_searchEdgesTotal;
+
   rc = diskAnnSelectRandomShadowRow(pIndex, &nStartRowid);
   if( rc == SQLITE_DONE ){
-    // SQLITE_DONE returned from select function is a signal that table is empty table - return zero rows in this case
     pRows->nRows = 0;
     pRows->nCols = pKey->nKeyColumns;
     return SQLITE_OK;
@@ -1462,10 +1537,19 @@ int diskAnnSearch(
     *pzErrMsg = sqlite3_mprintf("vector index(search): failed to initialize search context");
     goto out;
   }
+
+  /* Graph traversal (timed) */
+  clock_gettime(CLOCK_MONOTONIC, &_qg0);
+  g_distTimingEnabled = 1;
   rc = diskAnnSearchInternal(pIndex, &ctx, nStartRowid, pzErrMsg);
+  g_distTimingEnabled = 0;
+  clock_gettime(CLOCK_MONOTONIC, &_qg1);
   if( rc != SQLITE_OK ){
     goto out;
   }
+
+  /* Result collection (timed) */
+  clock_gettime(CLOCK_MONOTONIC, &_qr0);
   nOutRows = MIN(k, ctx.nTopCandidates);
   rc = vectorOutRowsAlloc(pIndex->db, pRows, nOutRows, pKey->nKeyColumns, vectorIdxKeyRowidLike(pKey));
   if( rc != SQLITE_OK ){
@@ -1483,8 +1567,31 @@ int diskAnnSearch(
       goto out;
     }
   }
+  clock_gettime(CLOCK_MONOTONIC, &_qr1);
+
+  /* Accumulate search stats */
+  blobReadAfter = g_totalBlobReadMs;
+  blobReadCountAfter = pIndex->nReads;
+  visitedAfter = g_searchVisitedTotal;
+  edgesAfter = g_searchEdgesTotal;
+
+  g_queryCount++;
+  {
+    double totalMs = (_qr1.tv_sec - _q0.tv_sec)*1000.0 + (_qr1.tv_nsec - _q0.tv_nsec)/1e6;
+    double graphMs = (_qg1.tv_sec - _qg0.tv_sec)*1000.0 + (_qg1.tv_nsec - _qg0.tv_nsec)/1e6;
+    double resultMs = (_qr1.tv_sec - _qr0.tv_sec)*1000.0 + (_qr1.tv_nsec - _qr0.tv_nsec)/1e6;
+    g_queryTotalMs += totalMs;
+    g_queryGraphMs += graphMs;
+    g_queryResultMs += resultMs;
+    g_queryBlobReadMs += (blobReadAfter - blobReadBefore);
+    g_queryBlobReads += (blobReadCountAfter - blobReadCountBefore);
+    g_queryNodesVisited += (visitedAfter - visitedBefore);
+    g_queryEdgesExamined += (edgesAfter - edgesBefore);
+  }
+
   rc = SQLITE_OK;
 out:
+  clock_gettime(CLOCK_MONOTONIC, &_q1);
   diskAnnSearchCtxDeinit(&ctx);
   return rc;
 }
@@ -1501,8 +1608,13 @@ int diskAnnInsert(
   DiskAnnNode *pVisited;
   DiskAnnSearchCtx ctx;
   VectorPair vInsert, vCandidate;
+  struct timespec _ts0, _ts1, _si0, _si1, _p1a, _p1b, _p2a, _p2b, _fl0, _fl1;
   vInsert.pNode = NULL; vInsert.pEdge = NULL;
   vCandidate.pNode = NULL; vCandidate.pEdge = NULL;
+
+  g_totalInsertCount++;
+  g_totalReads = pIndex->nReads;
+  g_totalWrites = pIndex->nWrites;
 
   if( pVectorInRow->pVector->dims != pIndex->nVectorDims ){
     *pzErrMsg = sqlite3_mprintf("vector index(insert): dimensions are different: %d != %d", pVectorInRow->pVector->dims, pIndex->nVectorDims);
@@ -1543,14 +1655,23 @@ int diskAnnInsert(
     goto out;
   }
   if( !first ){
-    // search is made before insetion in order to simplify life with "zombie" edges which can have same IDs as new inserted row
+    clock_gettime(CLOCK_MONOTONIC, &_ts0);
     rc = diskAnnSearchInternal(pIndex, &ctx, nStartRowid, pzErrMsg);
+    clock_gettime(CLOCK_MONOTONIC, &_ts1);
+    g_totalSearchMs += (_ts1.tv_sec - _ts0.tv_sec)*1000.0
+                     + (_ts1.tv_nsec - _ts0.tv_nsec)/1e6;
     if( rc != SQLITE_OK ){
       goto out;
     }
   }
 
-  rc = diskAnnInsertShadowRow(pIndex, pVectorInRow, &nNewRowid);
+  {
+    clock_gettime(CLOCK_MONOTONIC, &_si0);
+    rc = diskAnnInsertShadowRow(pIndex, pVectorInRow, &nNewRowid);
+    clock_gettime(CLOCK_MONOTONIC, &_si1);
+    g_totalShadowInsMs += (_si1.tv_sec - _si0.tv_sec)*1000.0
+                        + (_si1.tv_nsec - _si0.tv_nsec)/1e6;
+  }
   if( rc != SQLITE_OK ){
     *pzErrMsg = sqlite3_mprintf("vector index(insert): failed to insert shadow row");
     goto out;
@@ -1569,6 +1690,7 @@ int diskAnnInsert(
     goto out;
   }
   // first pass - add all visited nodes as a potential neighbours of new node
+  clock_gettime(CLOCK_MONOTONIC, &_p1a);
   for(pVisited = ctx.visitedList; pVisited != NULL; pVisited = pVisited->pNext){
     Vector nodeVector;
     int iReplace;
@@ -1584,8 +1706,12 @@ int diskAnnInsert(
     nodeBinReplaceEdge(pIndex, pBlobSpot, iReplace, pVisited->nRowid, nodeToNew, vCandidate.pEdge);
     diskAnnPruneEdges(pIndex, pBlobSpot, iReplace, &vInsert);
   }
+  clock_gettime(CLOCK_MONOTONIC, &_p1b);
+  g_totalPass1Ms += (_p1b.tv_sec - _p1a.tv_sec)*1000.0
+                  + (_p1b.tv_nsec - _p1a.tv_nsec)/1e6;
 
   // second pass - add new node as a potential neighbour of all visited nodes
+  clock_gettime(CLOCK_MONOTONIC, &_p2a);
   loadVectorPair(&vInsert, pVectorInRow->pVector);
   for(pVisited = ctx.visitedList; pVisited != NULL; pVisited = pVisited->pNext){
     int iReplace;
@@ -1604,13 +1730,20 @@ int diskAnnInsert(
       goto out;
     }
   }
+  clock_gettime(CLOCK_MONOTONIC, &_p2b);
+  g_totalPass2Ms += (_p2b.tv_sec - _p2a.tv_sec)*1000.0
+                  + (_p2b.tv_nsec - _p2a.tv_nsec)/1e6;
 
   rc = SQLITE_OK;
 out:
   deinitVectorPair(&vInsert);
   deinitVectorPair(&vCandidate);
   if( rc == SQLITE_OK ){
+    clock_gettime(CLOCK_MONOTONIC, &_fl0);
     rc = blobSpotFlush(pIndex, pBlobSpot);
+    clock_gettime(CLOCK_MONOTONIC, &_fl1);
+    g_totalFlushMs += (_fl1.tv_sec - _fl0.tv_sec)*1000.0
+                    + (_fl1.tv_nsec - _fl0.tv_nsec)/1e6;
     if( rc != SQLITE_OK ){
       *pzErrMsg = sqlite3_mprintf("vector index(insert): failed to flush blob");
     }
@@ -1618,6 +1751,8 @@ out:
   if( pBlobSpot != NULL ){
     blobSpotFree(pBlobSpot);
   }
+  g_totalReads = pIndex->nReads;
+  g_totalWrites = pIndex->nWrites;
   diskAnnSearchCtxDeinit(&ctx);
   return rc;
 }
@@ -1774,7 +1909,73 @@ int diskAnnOpenIndex(
   return SQLITE_OK;
 }
 
+static void diskAnnPrintSearchStats(void){
+  if( g_queryCount > 0 ){
+    double avgTotal = g_queryTotalMs / g_queryCount;
+    double avgGraph = g_queryGraphMs / g_queryCount;
+    double avgResult = g_queryResultMs / g_queryCount;
+    double avgBlobRead = g_queryBlobReadMs / g_queryCount;
+    double avgDist = g_queryDistanceMs / g_queryCount;
+    double avgVisited = (double)g_queryNodesVisited / g_queryCount;
+    double avgEdges = (double)g_queryEdgesExamined / g_queryCount;
+    double avgBlobCount = (double)g_queryBlobReads / g_queryCount;
+    double avgDistCalls = (double)g_queryDistanceCalls / g_queryCount;
+    double qps = g_queryTotalMs > 0 ? g_queryCount / (g_queryTotalMs / 1000.0) : 0;
+    fprintf(stderr, "\n=== diskAnn search breakdown (%d queries) ===\n", g_queryCount);
+    fprintf(stderr, "  total:          %8.1f ms  (avg %.3f ms/q, %.0f q/s)\n",
+            g_queryTotalMs, avgTotal, qps);
+    fprintf(stderr, "  graph traversal:%8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
+            g_queryGraphMs, avgGraph, g_queryGraphMs/g_queryTotalMs*100);
+    fprintf(stderr, "    blob read I/O:%8.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
+            g_queryBlobReadMs, avgBlobRead,
+            g_queryGraphMs > 0 ? g_queryBlobReadMs/g_queryGraphMs*100 : 0);
+    fprintf(stderr, "    distance:     %8.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
+            g_queryDistanceMs, avgDist,
+            g_queryGraphMs > 0 ? g_queryDistanceMs/g_queryGraphMs*100 : 0);
+    fprintf(stderr, "  result collect: %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
+            g_queryResultMs, avgResult, g_queryResultMs/g_queryTotalMs*100);
+    fprintf(stderr, "  blob reads: %d total (avg %.1f/q, avg %.4f ms/read)\n",
+            g_queryBlobReads, avgBlobCount,
+            g_queryBlobReads > 0 ? g_queryBlobReadMs / g_queryBlobReads : 0);
+    fprintf(stderr, "  nodes visited: %d total (avg %.1f/q)\n",
+            g_queryNodesVisited, avgVisited);
+    fprintf(stderr, "  edges examined: %lld total (avg %.1f/q, avg %.1f edges/node)\n",
+            g_queryEdgesExamined, avgEdges,
+            g_queryNodesVisited > 0 ? (double)g_queryEdgesExamined / g_queryNodesVisited : 0);
+    fprintf(stderr, "  distance calls: %d total (avg %.1f/q)\n",
+            g_queryDistanceCalls, avgDistCalls);
+    fprintf(stderr, "================================================\n");
+  }
+}
+
+static void diskAnnPrintInsertStats(void){
+  if( g_totalInsertCount > 0 ){
+    double total = g_totalSearchMs + g_totalShadowInsMs + g_totalPass1Ms + g_totalPass2Ms + g_totalFlushMs;
+    fprintf(stderr, "\n=== diskAnn insert breakdown (%d inserts) ===\n", g_totalInsertCount);
+    fprintf(stderr, "  search:         %8.1f ms  (%5.1f%%)\n", g_totalSearchMs, g_totalSearchMs/total*100);
+    fprintf(stderr, "  shadow insert:  %8.1f ms  (%5.1f%%)\n", g_totalShadowInsMs, g_totalShadowInsMs/total*100);
+    fprintf(stderr, "  pass1 (new):    %8.1f ms  (%5.1f%%)\n", g_totalPass1Ms, g_totalPass1Ms/total*100);
+    fprintf(stderr, "  pass2 (nbrs):   %8.1f ms  (%5.1f%%)\n", g_totalPass2Ms, g_totalPass2Ms/total*100);
+    fprintf(stderr, "  flush new node: %8.1f ms  (%5.1f%%)\n", g_totalFlushMs, g_totalFlushMs/total*100);
+    fprintf(stderr, "  total:          %8.1f ms\n", total);
+    fprintf(stderr, "  blob reads: %d (%.1f ms, %.4f ms/op)  writes: %d (%.1f ms, %.4f ms/op)\n",
+            g_totalReads, g_totalBlobReadMs,
+            g_totalReads > 0 ? g_totalBlobReadMs / g_totalReads : 0,
+            g_totalWrites, g_totalBlobWriteMs,
+            g_totalWrites > 0 ? g_totalBlobWriteMs / g_totalWrites : 0);
+    fprintf(stderr, "  search: totalVisited=%d totalEdges=%lld avgEdges=%.1f\n",
+            g_searchVisitedTotal, g_searchEdgesTotal,
+            g_searchVisitedTotal > 0 ? (double)g_searchEdgesTotal / g_searchVisitedTotal : 0.0);
+    fprintf(stderr, "================================================\n");
+  }
+}
+
 void diskAnnCloseIndex(DiskAnnIndex *pIndex){
+  if( !g_atexitRegistered ){
+    atexit(diskAnnPrintInsertStats);
+    atexit(diskAnnPrintSearchStats);
+    g_atexitRegistered = 1;
+  }
   if( pIndex->zDbSName ){
     sqlite3DbFree(pIndex->db, pIndex->zDbSName);
   }
