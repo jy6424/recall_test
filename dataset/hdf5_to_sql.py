@@ -22,8 +22,9 @@ def main():
     f = h5py.File(hdf5_path, "r")
     print(f"Keys: {list(f.keys())}")
 
-    train = f["train"]
-    test = f["test"]
+    data = f["train"][:110000]
+    train = data[:100000]
+    test = data[100000:]
     dim = train.shape[1]
     n_train = train.shape[0] if max_inserts is None else min(train.shape[0], max_inserts)
     n_test = test.shape[0]
@@ -36,24 +37,24 @@ def main():
         print(f"Ground truth neighbors: {f['neighbors'].shape}")
 
     # Generate insert SQL
-    insert_file = f"insert100k_coco.sql"
+    insert_file = f"insert100k_cohere.sql"
     print(f"Writing {insert_file} ...")
     with open(insert_file, "w") as out:
         out.write("PRAGMA journal_mode=WAL;\n")
-        out.write(f"CREATE TABLE vectors(id INTEGER PRIMARY KEY, embedding F32_BLOB({dim}));\n")
-        out.write("CREATE INDEX vec_idx ON vectors(libsql_vector_idx(embedding));\n")
+        out.write(f"CREATE TABLE x(id INTEGER PRIMARY KEY, embedding F32_BLOB({dim}));\n")
+        out.write("CREATE INDEX x_idx ON vectors(libsql_vector_idx(embedding));\n")
         for i in range(n_train):
             vec = train[i]
-            v = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
-            out.write(f"INSERT INTO vectors VALUES ({i+1}, vector32('{v}'));\n")
+            v = "[" + ",".join(repr(float(x)) for x in vec) + "]"
+            out.write(f"INSERT INTO x VALUES ({i+1}, vector32('{v}'));\n")
 
     # Generate query SQL
-    query_file = f"query10k_coco.sql"
+    query_file = f"query10k_cohere.sql"
     print(f"Writing {query_file} ...")
     with open(query_file, "w") as out:
         for vec in test:
-            v = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
-            out.write(f"SELECT id FROM vector_top_k('vec_idx', vector32('{v}'), {k});\n")
+            v = "[" + ",".join(repr(float(x)) for x in vec) + "]"
+            out.write(f"SELECT id FROM vector_top_k('x_idx', vector32('{v}'), {k});\n")
 
     # Recompute ground truth for the subset
     print(f"Computing ground truth for {n_train} vectors, {n_test} queries (k={k}) ...")
@@ -76,8 +77,8 @@ def main():
         if (i // batch_size) % 10 == 0:
             print(f"  {i}/{n_test} queries done")
     # Save as 1-indexed IDs (matching SQL INSERT IDs)
-    gt_file = f"groundtruth_coco.txt"
-    np.savetxt(gt_file, neighbors + 1, fmt="%d")
+    gt_file = f"groundtruth_cohere.txt"
+    np.savetxt(gt_file, neighbors + 1, fmt="%d", delimiter=",")
     print(f"Ground truth saved to {gt_file} (shape: {neighbors.shape})")
 
     f.close()
