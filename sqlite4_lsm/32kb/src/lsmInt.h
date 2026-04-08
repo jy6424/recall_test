@@ -42,7 +42,7 @@
 ** Default values for various data structure parameters. These may be
 ** overridden by calls to lsm_config().
 */
-#define LSM_DFLT_PAGE_SIZE          (32 * 1024)
+#define LSM_DFLT_PAGE_SIZE          (4 * 1024)
 #define LSM_DFLT_BLOCK_SIZE         (1 * 1024 * 1024)
 #define LSM_DFLT_AUTOFLUSH          (256 * 1024 * 1024)
 #define LSM_DFLT_AUTOCHECKPOINT     (i64)(2 * 1024 * 1024)
@@ -784,6 +784,15 @@ void lsmFsPurgeCache(FileSystem *);
 int lsmInfoPageDump(lsm_db *, Pgno, int, char **);
 void lsmSortedCleanup(lsm_db *);
 int lsmSortedAutoWork(lsm_db *, int nUnit);
+
+/* Auto-compaction timing globals (defined in lsm_sorted.c) */
+extern double g_autoworkTotalMs;
+extern int g_autoworkCalls;
+extern int g_autoworkPages;
+extern double g_flushTotalMs;
+extern int g_flushCalls;
+extern double g_mergeTotalMs;
+extern int g_mergeCalls;
 
 int lsmSortedWalkFreelist(lsm_db *, int, int (*)(void *, int, i64), void *);
 

@@ -71,6 +71,52 @@
 # include "lsmInt.h"
 #endif
 #include "sqlite4.h"            /* only for sqlite4_snprintf() */
+#include <time.h>
+
+/* Auto-compaction timing globals */
+double g_autoworkTotalMs = 0.0;
+int g_autoworkCalls = 0;
+int g_autoworkPages = 0;
+double g_flushTotalMs = 0.0;
+int g_flushCalls = 0;
+double g_mergeTotalMs = 0.0;
+int g_mergeCalls = 0;
+static int g_prevLevelCount = -1;
+
+static double autowork_time_ms(struct timespec *start, struct timespec *end){
+  return (end->tv_sec - start->tv_sec) * 1000.0
+       + (end->tv_nsec - start->tv_nsec) / 1000000.0;
+}
+
+static void dumpLevelsStderr(lsm_db *pDb){
+  Level *pLevel;
+  Snapshot *pSnap = pDb->pClient;
+  int nLevel = 0;
+  int totalPages = 0;
+
+  if( !pSnap ) return;
+  for(pLevel=lsmDbSnapshotLevel(pSnap); pLevel; pLevel=pLevel->pNext){
+    nLevel++;
+  }
+  /* Only print when level count changes */
+  if( nLevel == g_prevLevelCount ) return;
+  g_prevLevelCount = nLevel;
+
+  fprintf(stderr, "[LSM] %d levels:", nLevel);
+  for(pLevel=lsmDbSnapshotLevel(pSnap); pLevel; pLevel=pLevel->pNext){
+    int lhsPages = pLevel->lhs.nSize;
+    totalPages += lhsPages;
+    if( pLevel->nRight > 0 ){
+      int i, rhsTotal = 0;
+      for(i=0; i<pLevel->nRight; i++) rhsTotal += pLevel->aRhs[i].nSize;
+      totalPages += rhsTotal;
+      fprintf(stderr, " [%dp+%d*rhs(level=%d,merging)]", lhsPages, rhsTotal, pLevel->iAge);
+    }else{
+      fprintf(stderr, " [%dp(level=%d)]", lhsPages, pLevel->iAge);
+    }
+  }
+  fprintf(stderr, " total=%dp\n", totalPages);
+}
 
 #define LSM_LOG_STRUCTURE 0
 #define LSM_LOG_DATA      0
@@ -5214,7 +5260,12 @@ static int doLsmSingleWork(
     ** Skip this merge step in flush-only mode.  */
     if( !bFlushOnly && sortedDbIsFull(pDb) ){
       int nPg = 0;
+      struct timespec ms, me;
+      clock_gettime(CLOCK_MONOTONIC, &ms);
       rc = sortedWork(pDb, nRem, nMerge, 1, &nPg);
+      clock_gettime(CLOCK_MONOTONIC, &me);
+      g_mergeTotalMs += autowork_time_ms(&ms, &me);
+      g_mergeCalls++;
       nRem -= nPg;
       assert( rc!=LSM_OK || nRem<=0 || !sortedDbIsFull(pDb) );
       bDirty = 1;
@@ -5222,7 +5273,12 @@ static int doLsmSingleWork(
 
     if( rc==LSM_OK && nRem>0 ){
       int nPg = 0;
+      struct timespec fs, fe;
+      clock_gettime(CLOCK_MONOTONIC, &fs);
       rc = sortedNewToplevel(pDb, TREE_OLD, &nPg);
+      clock_gettime(CLOCK_MONOTONIC, &fe);
+      g_flushTotalMs += autowork_time_ms(&fs, &fe);
+      g_flushCalls++;
       nRem -= nPg;
       if( rc==LSM_OK ){
         if( pDb->nTransOpen>0 ){
@@ -5238,7 +5294,12 @@ static int doLsmSingleWork(
   ** Skip in flush-only mode.  */
   if( rc==LSM_OK && nRem>0 && bShutdown==0 && !bFlushOnly ){
     int nPg = 0;
+    struct timespec ms2, me2;
+    clock_gettime(CLOCK_MONOTONIC, &ms2);
     rc = sortedWork(pDb, nRem, nMerge, 0, &nPg);
+    clock_gettime(CLOCK_MONOTONIC, &me2);
+    g_mergeTotalMs += autowork_time_ms(&ms2, &me2);
+    g_mergeCalls++;
     nRem -= nPg;
     if( nPg ) bDirty = 1;
   }
@@ -5507,15 +5568,22 @@ int lsmSortedAutoWork(
 
   if( nDepth>0 ){
     int nRemaining;               /* Units of work to do before returning */
+    struct timespec aw_start, aw_end;
 
     nRemaining = nUnit * nDepth;
 #ifdef LSM_LOG_WORK
-    lsmLogMessage(pDb, rc, "lsmSortedAutoWork(): %d*%d = %d pages", 
+    lsmLogMessage(pDb, rc, "lsmSortedAutoWork(): %d*%d = %d pages",
         nUnit, nDepth, nRemaining);
 #endif
     assert( nRemaining>=0 );
+    clock_gettime(CLOCK_MONOTONIC, &aw_start);
     rc = doLsmWork(pDb, pDb->nMerge, nRemaining, !pDb->bAutowork, 0);
+    clock_gettime(CLOCK_MONOTONIC, &aw_end);
+    g_autoworkTotalMs += autowork_time_ms(&aw_start, &aw_end);
+    g_autoworkCalls++;
+    g_autoworkPages += nRemaining;
     if( rc==LSM_BUSY ) rc = LSM_OK;
+    dumpLevelsStderr(pDb);
 
     if( bRestore && pDb->pCsr ){
       lsmMCursorFreeCache(pDb);

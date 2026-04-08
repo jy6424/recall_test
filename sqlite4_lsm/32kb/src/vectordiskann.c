@@ -2087,6 +2087,15 @@ static void diskAnnPrintSearchStats(void){
   }
 }
 
+/* Auto-compaction timing globals from lsm_sorted.c */
+extern double g_autoworkTotalMs;
+extern int g_autoworkCalls;
+extern int g_autoworkPages;
+extern double g_flushTotalMs;
+extern int g_flushCalls;
+extern double g_mergeTotalMs;
+extern int g_mergeCalls;
+
 static void diskAnnPrintInsertStats(void){
   if( g_totalInsertCount > 0 ){
     double total = g_totalSearchMs + g_totalShadowInsMs + g_totalPass1Ms + g_totalPass2Ms + g_totalNewFlushMs;
@@ -2111,6 +2120,10 @@ static void diskAnnPrintInsertStats(void){
     fprintf(stderr, "  search: totalVisited=%d totalEdges=%lld avgEdges=%.1f\n",
             g_searchVisitedTotal, g_searchEdgesTotal,
             g_searchVisitedTotal > 0 ? (double)g_searchEdgesTotal / g_searchVisitedTotal : 0.0);
+    fprintf(stderr, "  autowork: %.1f ms (%d calls, %d pages)\n",
+            g_autoworkTotalMs, g_autoworkCalls, g_autoworkPages);
+    fprintf(stderr, "    flush: %.1f ms (%d calls)\n", g_flushTotalMs, g_flushCalls);
+    fprintf(stderr, "    merge: %.1f ms (%d calls)\n", g_mergeTotalMs, g_mergeCalls);
     fprintf(stderr, "================================================\n");
   }
 }
