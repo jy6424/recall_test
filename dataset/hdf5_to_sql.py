@@ -55,11 +55,18 @@ def main():
             v = "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
             out.write(f"SELECT id FROM vector_top_k('vec_idx', vector32('{v}'), {k});\n")
 
-    # Save ground truth if available
-    if "neighbors" in f:
-        gt_file = f"groundtruth_coco.txt"
-        np.savetxt(gt_file, f["neighbors"][:], fmt="%d")
-        print(f"Ground truth saved to {gt_file}")
+    # Recompute ground truth for the subset
+    print(f"Computing ground truth for {n_train} vectors, {n_test} queries (k={k}) ...")
+    from sklearn.neighbors import NearestNeighbors
+    train_np = train[:n_train]
+    test_np = test[:]
+    nn = NearestNeighbors(n_neighbors=k, metric="cosine", algorithm="brute")
+    nn.fit(train_np)
+    distances, neighbors = nn.kneighbors(test_np)
+    # Save as 1-indexed IDs (matching SQL INSERT IDs)
+    gt_file = f"groundtruth_coco.txt"
+    np.savetxt(gt_file, neighbors + 1, fmt="%d")
+    print(f"Ground truth saved to {gt_file} (shape: {neighbors.shape})")
 
     f.close()
     print("Done!")
