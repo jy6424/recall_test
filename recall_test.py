@@ -46,6 +46,19 @@ def run_compact(compact_bin, db):
     return proc.stderr
 
 
+def drop_caches(enabled=True):
+    """Drop OS page cache. Requires sudo."""
+    if not enabled:
+        return
+    try:
+        subprocess.run(["sudo", "-n", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"],
+                       check=True, timeout=10)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"  WARNING: drop_caches failed: {e}")
+
+
+
+
 def read_sql(sql_path):
     with open(sql_path) as f:
         return f.read()
@@ -144,7 +157,8 @@ def parse_diskann_stats(stderr_text):
 
 
 def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
-                   gt_results, k, db_dir, is_sqlite3=False, auto_compact=False):
+                   gt_results, k, db_dir, is_sqlite3=False, auto_compact=False,
+                   do_drop_cache=False):
     db_path = os.path.join(db_dir, f"bench_{label}.db")
     cleanup_db(db_path, is_sqlite3)
 
@@ -167,6 +181,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     run_shell(shell, db_path, "\n".join(schema_lines))  # ignore return tuple
 
     # Insert (timed — equivalent to ann-benchmarks fit())
+    drop_caches(do_drop_cache)
     t0 = time.time()
     ins_out, ins_err = run_shell(shell, db_path, "\n".join(insert_lines))
     t_insert = time.time() - t0
@@ -189,6 +204,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     # Compact (sqlite4 with auto_compact=0 only)
     if need_compact:
         print(f"  [2/{n_phases}] Compacting...")
+        drop_caches()
         t0 = time.time()
         compact_out = run_compact(compact_bin, db_path)
         t_compact = time.time() - t0
@@ -209,6 +225,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     print(f"  [{phase_q}/{n_phases}] Querying...")
     query_sql = read_sql(query_sql_path)
 
+    drop_caches(do_drop_cache)
     t0 = time.time()
     ann_out, q_err = run_shell(shell, db_path, query_sql)
     t_query = time.time() - t0
@@ -261,6 +278,8 @@ def main():
     parser.add_argument("--auto-compact", type=int, default=0, choices=[0, 1],
                         help="0: use compact_db after insert (autowork=0), "
                              "1: skip compact_db (autowork=1 handles it)")
+    parser.add_argument("--drop-cache", action="store_true",
+                        help="Drop OS page cache before each timed phase (requires sudo)")
     args = parser.parse_args()
 
     page_sizes_kb = [int(x) for x in args.page_sizes.split(",")]
@@ -330,7 +349,7 @@ def main():
             result = run_one_config(
                 run_label, shell, compact_bin, insert_sql, query_sql,
                 gt_results, args.k, args.db_dir, is_sqlite3=is_s3,
-                auto_compact=auto_compact
+                auto_compact=auto_compact, do_drop_cache=args.drop_cache
             )
             ds_results.append(result)
 
