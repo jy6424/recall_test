@@ -57,12 +57,24 @@ def main():
 
     # Recompute ground truth for the subset
     print(f"Computing ground truth for {n_train} vectors, {n_test} queries (k={k}) ...")
-    from sklearn.neighbors import NearestNeighbors
     train_np = train[:n_train]
     test_np = test[:]
-    nn = NearestNeighbors(n_neighbors=k, metric="cosine", algorithm="brute")
-    nn.fit(train_np)
-    distances, neighbors = nn.kneighbors(test_np)
+    # Normalize for cosine similarity
+    train_norm = train_np / np.linalg.norm(train_np, axis=1, keepdims=True)
+    test_norm = test_np / np.linalg.norm(test_np, axis=1, keepdims=True)
+    # Compute cosine similarity in batches to save memory
+    neighbors = np.zeros((n_test, k), dtype=np.int32)
+    batch_size = 100
+    for i in range(0, n_test, batch_size):
+        end = min(i + batch_size, n_test)
+        sims = test_norm[i:end] @ train_norm.T  # (batch, n_train)
+        topk = np.argpartition(-sims, k, axis=1)[:, :k]
+        for j in range(end - i):
+            idx = topk[j]
+            idx = idx[np.argsort(-sims[j][idx])]
+            neighbors[i + j] = idx
+        if (i // batch_size) % 10 == 0:
+            print(f"  {i}/{n_test} queries done")
     # Save as 1-indexed IDs (matching SQL INSERT IDs)
     gt_file = f"groundtruth_coco.txt"
     np.savetxt(gt_file, neighbors + 1, fmt="%d")
