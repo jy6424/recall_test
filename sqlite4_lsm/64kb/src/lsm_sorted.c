@@ -5583,7 +5583,6 @@ int lsmSortedAutoWork(
     g_autoworkCalls++;
     g_autoworkPages += nRemaining;
     if( rc==LSM_BUSY ) rc = LSM_OK;
-    dumpLevelsStderr(pDb);
 
     if( bRestore && pDb->pCsr ){
       lsmMCursorFreeCache(pDb);

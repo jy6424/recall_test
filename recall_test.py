@@ -23,6 +23,8 @@ def run_shell_one(shell, db, sql_file):
 
 def run_shell(shell, db, sql_input):
     """Run SQL through shell in one session. Returns (stdout, stderr)."""
+    if not sql_input.rstrip().endswith(".quit"):
+        sql_input = sql_input + "\n.quit\n"
     proc = subprocess.run(
         [shell, db],
         input=sql_input,
@@ -31,8 +33,10 @@ def run_shell(shell, db, sql_input):
         text=True,
         timeout=20000,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(f"shell error (rc={proc.returncode}): {proc.stderr[:500]}")
+    if proc.returncode != 0 and proc.returncode != 1:
+        err_lines = [l for l in proc.stderr.splitlines() if not l.startswith("[LSM]")]
+        err_msg = "\n".join(err_lines[-10:]) if err_lines else proc.stderr[-500:]
+        raise RuntimeError(f"shell error (rc={proc.returncode}): {err_msg}")
     return proc.stdout, proc.stderr
 
 
