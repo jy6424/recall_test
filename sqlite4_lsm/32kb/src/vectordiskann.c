@@ -62,6 +62,23 @@ static long long g_queryEdgesExamined = 0; /* total edges examined */
 static double g_queryDistanceMs = 0;    /* distance computation time */
 static int g_queryDistanceCalls = 0;    /* distance computation count */
 
+/* Auto-compaction timing globals from lsm_sorted.c / DiskANN write attribution */
+extern double g_autoworkTotalMs;
+extern int g_autoworkCalls;
+extern int g_autoworkPages;
+double g_diskannAutoworkMs = 0.0;
+
+static double diskAnnAutoworkSnapshot(void){
+  return g_autoworkTotalMs;
+}
+
+static void diskAnnAutoworkAccumulate(double beforeMs){
+  double deltaMs = g_autoworkTotalMs - beforeMs;
+  if( deltaMs > 0.0 ){
+    g_diskannAutoworkMs += deltaMs;
+  }
+}
+
 // #define SQLITE4_VECTOR_TRACE
 #if defined(SQLITE4_DEBUG) && defined(SQLITE4_VECTOR_TRACE)
 #define DiskAnnTrace(X) sqlite4DebugPrintf X;
@@ -409,6 +426,7 @@ int blobSpotFlush(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot) {
   int nRec;
   sqlite4_env *pEnv = pIndex->db->pEnv;
   struct timespec _kvw0, _kvw1;
+  double autoworkBeforeMs;
 
   nKey = blobSpotBuildKey(pIndex, (i64)pBlobSpot->nRowid, aKey);
 
@@ -419,7 +437,9 @@ int blobSpotFlush(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot) {
                               pBlobSpot->nBufferSize, aRec);
 
   clock_gettime(CLOCK_MONOTONIC, &_kvw0);
+  autoworkBeforeMs = diskAnnAutoworkSnapshot();
   rc = sqlite4KVStoreReplace(pIndex->db->aDb[0].pKV, aKey, nKey, aRec, nRec);
+  diskAnnAutoworkAccumulate(autoworkBeforeMs);
   clock_gettime(CLOCK_MONOTONIC, &_kvw1);
   g_totalKvWriteMs += (_kvw1.tv_sec - _kvw0.tv_sec)*1000.0
                     + (_kvw1.tv_nsec - _kvw0.tv_nsec)/1e6;
@@ -917,6 +937,7 @@ static int diskAnnInsertShadowRow(const DiskAnnIndex *pIndex, const VectorInRow 
   char *zSql = NULL;
   u8 *pZero = NULL;
   sqlite4_env *pEnv = pIndex->db->pEnv;
+  double autoworkBeforeMs = 0.0;
 
   s_shadowInsertCount++;
   *pRowid = pVectorInRow->nRowid;
@@ -955,7 +976,9 @@ static int diskAnnInsertShadowRow(const DiskAnnIndex *pIndex, const VectorInRow 
     goto out;
   }
 
+  autoworkBeforeMs = diskAnnAutoworkSnapshot();
   rc = sqlite4_step(pStmt);
+  diskAnnAutoworkAccumulate(autoworkBeforeMs);
   if( rc != SQLITE4_DONE ){
     rc = SQLITE4_ERROR;
     goto out;
@@ -974,6 +997,7 @@ out:
 static int diskAnnDeleteShadowRow(const DiskAnnIndex *pIndex, i64 nRowid){
   int rc;
   sqlite4_stmt *pStmt = NULL;
+  double autoworkBeforeMs = 0.0;
   char *zSql = sqlite4MPrintf(
       pIndex->db,
       "DELETE FROM \"%w\".%s WHERE index_key = ?",
@@ -993,7 +1017,9 @@ static int diskAnnDeleteShadowRow(const DiskAnnIndex *pIndex, i64 nRowid){
   if( rc != SQLITE4_OK ){
     goto out;
   }
+  autoworkBeforeMs = diskAnnAutoworkSnapshot();
   rc = sqlite4_step(pStmt);
+  diskAnnAutoworkAccumulate(autoworkBeforeMs);
   if( rc != SQLITE4_DONE ){
     rc = SQLITE4_ERROR;
     goto out;
@@ -2087,14 +2113,12 @@ static void diskAnnPrintSearchStats(void){
   }
 }
 
-/* Auto-compaction timing globals from lsm_sorted.c */
-extern double g_autoworkTotalMs;
-extern int g_autoworkCalls;
-extern int g_autoworkPages;
-
 static void diskAnnPrintInsertStats(void){
   if( g_totalInsertCount > 0 ){
     double total = g_totalSearchMs + g_totalShadowInsMs + g_totalPass1Ms + g_totalPass2Ms + g_totalNewFlushMs;
+    double autoworkInBuild = g_diskannAutoworkMs;
+    double autoworkOutsideBuild = g_autoworkTotalMs - g_diskannAutoworkMs;
+    if( autoworkOutsideBuild < 0.0 ) autoworkOutsideBuild = 0.0;
     fprintf(stderr, "\n=== diskAnn insert breakdown (%d inserts) ===\n", g_totalInsertCount);
     fprintf(stderr, "  search:         %8.1f ms  (%5.1f%%)\n", g_totalSearchMs, g_totalSearchMs/total*100);
     fprintf(stderr, "  shadow insert:  %8.1f ms  (%5.1f%%)\n", g_totalShadowInsMs, g_totalShadowInsMs/total*100);
@@ -2118,6 +2142,8 @@ static void diskAnnPrintInsertStats(void){
             g_searchVisitedTotal > 0 ? (double)g_searchEdgesTotal / g_searchVisitedTotal : 0.0);
     fprintf(stderr, "  autowork: %.1f ms (%d calls, %d pages)\n",
             g_autoworkTotalMs, g_autoworkCalls, g_autoworkPages);
+    fprintf(stderr, "    in DiskANN writes:   %.1f ms\n", autoworkInBuild);
+    fprintf(stderr, "    outside DiskANN:     %.1f ms\n", autoworkOutsideBuild);
     fprintf(stderr, "================================================\n");
   }
 }

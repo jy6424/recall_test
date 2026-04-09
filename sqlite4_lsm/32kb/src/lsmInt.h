@@ -46,7 +46,7 @@
 #define LSM_DFLT_BLOCK_SIZE         (1 * 1024 * 1024)
 #define LSM_DFLT_AUTOFLUSH          (1 * 1024 * 1024)
 #define LSM_DFLT_AUTOCHECKPOINT     (i64)(2 * 1024 * 1024)
-#define LSM_DFLT_AUTOWORK           0
+#define LSM_DFLT_AUTOWORK           1
 #define LSM_DFLT_LOG_SIZE           (128*1024)
 #define LSM_DFLT_AUTOMERGE          4
 #define LSM_DFLT_SAFETY             LSM_SAFETY_NORMAL
@@ -789,6 +789,7 @@ int lsmSortedAutoWork(lsm_db *, int nUnit);
 extern double g_autoworkTotalMs;
 extern int g_autoworkCalls;
 extern int g_autoworkPages;
+extern double g_diskannAutoworkMs;
 
 int lsmSortedWalkFreelist(lsm_db *, int, int (*)(void *, int, i64), void *);
 
