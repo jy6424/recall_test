@@ -2,7 +2,28 @@
 
 ### 파일 및 디렉토리 설명
     
-`dataset/` : GloVe 200d , SIFT 128d 데이터 각각 insert/query/groundtruth 포함하는 디렉토리
+`dataset/` : 데이터 각각의 insert/query/groundtruth 포함
+
+**데이터셋 용량문제로 인해 허깅페이스에 따로 업로드 했습니다.**
+
+https://huggingface.co/datasets/jiwanyuk/recall_test_dataset/tree/main
+
+다운로드 방법
+
+1. 허깅페이스 라이브러리 설치
+  
+```
+pip install huggingface-hub
+```
+
+2. ./dataset/ 디렉토리에 다운로드
+```  
+hf download jiwanyuk/recall_test_dataset --repo-type dataset --local-dir ./dataset
+```
+- 또는 특정 파일만 다운로드 (e.g. `insert100k_sift.sql`):
+```
+hf download jiwanyuk/recall_test_dataset insert100k_sift.sql --repo-type dataset --local-dir ./dataset
+```
 
 ---
 
