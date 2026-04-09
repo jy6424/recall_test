@@ -42,9 +42,9 @@
 ** Default values for various data structure parameters. These may be
 ** overridden by calls to lsm_config().
 */
-#define LSM_DFLT_PAGE_SIZE          (4 * 1024)
+#define LSM_DFLT_PAGE_SIZE          (32 * 1024)
 #define LSM_DFLT_BLOCK_SIZE         (1 * 1024 * 1024)
-#define LSM_DFLT_AUTOFLUSH          (256 * 1024 * 1024)
+#define LSM_DFLT_AUTOFLUSH          (1 * 1024 * 1024)
 #define LSM_DFLT_AUTOCHECKPOINT     (i64)(2 * 1024 * 1024)
 #define LSM_DFLT_AUTOWORK           0
 #define LSM_DFLT_LOG_SIZE           (128*1024)
