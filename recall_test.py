@@ -149,10 +149,8 @@ def parse_diskann_stats(stderr_text):
     grab(r'(?:KV|blob) reads:\s+\d+\s+\(([\d.]+)\s+ms', 'kv_read_ms')
     grab(r'writes:\s+(\d+)', 'kv_writes', int)
     grab(r'writes:\s+\d+\s+\(([\d.]+)\s+ms', 'kv_write_ms')
-    # Autowork / flush / merge
+    # Autowork
     grab(r'autowork:\s+([\d.]+)\s+ms', 'autowork_ms')
-    grab(r'flush:\s+([\d.]+)\s+ms', 'flush_ms')
-    grab(r'merge:\s+([\d.]+)\s+ms', 'merge_ms')
     # Query stats
     grab(r'graph time:\s+([\d.]+)\s+ms', 'graph_ms')
     grab(r'result time:\s+([\d.]+)\s+ms', 'result_ms')
@@ -201,9 +199,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         nr_s = ins_stats.get('kv_read_ms', 0) / 1000
         ni_s = ins_stats.get('kv_write_ms', 0) / 1000
         aw_s = ins_stats.get('autowork_ms', 0) / 1000
-        fl_s = ins_stats.get('flush_ms', 0) / 1000
-        mg_s = ins_stats.get('merge_ms', 0) / 1000
-        print(f"        Build={build_s:.1f}s  NodeRead={nr_s:.1f}s  NodeIns={ni_s:.1f}s  autowork={aw_s:.1f}s (flush={fl_s:.1f}s merge={mg_s:.1f}s)")
+        print(f"        Build={build_s:.1f}s  NodeRead={nr_s:.1f}s  NodeIns={ni_s:.1f}s  autowork={aw_s:.1f}s")
 
     # Compact (sqlite4 with auto_compact=0 only)
     if need_compact:
@@ -367,9 +363,9 @@ def main():
     # Summary per dataset
     show_compact = not auto_compact
     for ds_name, ds_results in all_results.items():
-        # Build header: Insert group | Query group | Size | Recall
-        ins_hdr = f"{'Overall':>8} {'Build':>8} {'NdRead':>8} {'NdIns':>8} {'Flush':>8} {'Merge':>8}"
-        ins_sub = f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8}"
+        # Build header: Insert group | Query group | Size
+        ins_hdr = f"{'Overall':>8} {'Build':>8} {'NdRead':>8} {'NdIns':>8} {'AutoWk':>8}"
+        ins_sub = f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8}"
         if show_compact:
             ins_hdr += f" {'Compact':>8}"
             ins_sub += f" {'(s)':>8}"
@@ -381,8 +377,7 @@ def main():
         print(f"\n{'='*w}")
         print(f"  SUMMARY: {ds_name} (k={args.k})")
         print(f"{'='*w}")
-        # Section labels
-        ins_w = len(ins_hdr) + 1  # +1 for leading |
+        ins_w = len(ins_hdr) + 1
         q_w = len(q_hdr) + 1
         print(f"{'':>16} |{'--- Insert ---':^{ins_w}} |{'--- Query ---':^{q_w}} |")
         print(hdr)
@@ -394,11 +389,10 @@ def main():
             build_s = ist.get('total_ms', 0) / 1000
             nr_s = ist.get('kv_read_ms', 0) / 1000
             ni_s = ist.get('kv_write_ms', 0) / 1000
-            fl_s = ist.get('flush_ms', 0) / 1000
-            mg_s = ist.get('merge_ms', 0) / 1000
+            aw_s = ist.get('autowork_ms', 0) / 1000
             q_time_s = r['query_time_s']
             ins_vals = (f"{r['insert_time_s']:>8.1f} "
-                        f"{build_s:>8.1f} {nr_s:>8.1f} {ni_s:>8.1f} {fl_s:>8.1f} {mg_s:>8.1f}")
+                        f"{build_s:>8.1f} {nr_s:>8.1f} {ni_s:>8.1f} {aw_s:>8.1f}")
             if show_compact:
                 compact_str = f"{r['compact_time_s']:>8.1f}" if r['compact_time_s'] > 0 else f"{'---':>8}"
                 ins_vals += f" {compact_str}"

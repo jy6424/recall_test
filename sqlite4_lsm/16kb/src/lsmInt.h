@@ -789,10 +789,6 @@ int lsmSortedAutoWork(lsm_db *, int nUnit);
 extern double g_autoworkTotalMs;
 extern int g_autoworkCalls;
 extern int g_autoworkPages;
-extern double g_flushTotalMs;
-extern int g_flushCalls;
-extern double g_mergeTotalMs;
-extern int g_mergeCalls;
 
 int lsmSortedWalkFreelist(lsm_db *, int, int (*)(void *, int, i64), void *);
 
