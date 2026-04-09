@@ -142,17 +142,17 @@ def parse_diskann_stats(stderr_text):
             stats[key] = conv(m.group(1))
 
     # Insert breakdown
-    grab(r'table insert:\s+([\d.]+)\s+ms', 'table_insert_ms')
-    grab(r'index build:\s+([\d.]+)\s+ms', 'build_total_ms')
-    grab(r'build read I/O:\s+([\d.]+)\s+ms', 'build_read_ms')
-    grab(r'build write I/O:\s+([\d.]+)\s+ms', 'build_write_ms')
-    grab(r'build distance:\s+([\d.]+)\s+ms', 'build_dist_ms')
-    grab(r'LSM work during build:\s+([\d.]+)\s+ms', 'build_lsm_ms')
+    grab(r'table insert:\s*([\d.]+)\s+ms', 'table_insert_ms')
+    grab(r'index build:\s*([\d.]+)\s+ms', 'build_total_ms')
+    grab(r'build read I/O:\s*([\d.]+)\s+ms', 'build_read_ms')
+    grab(r'build write I/O:\s*([\d.]+)\s+ms', 'build_write_ms')
+    grab(r'build distance:\s*([\d.]+)\s+ms', 'build_dist_ms')
+    grab(r'LSM work during build:\s*([\d.]+)\s+ms', 'build_lsm_ms')
     # Query stats
-    grab(r'graph traversal:\s+([\d.]+)\s+ms', 'graph_ms')
-    grab(r'query read I/O:\s+([\d.]+)\s+ms', 'query_read_ms')
-    grab(r'query distance:\s+([\d.]+)\s+ms', 'query_dist_ms')
-    grab(r'result collect:\s+([\d.]+)\s+ms', 'result_ms')
+    grab(r'graph traversal:\s*([\d.]+)\s+ms', 'graph_ms')
+    grab(r'query read I/O:\s*([\d.]+)\s+ms', 'query_read_ms')
+    grab(r'query distance:\s*([\d.]+)\s+ms', 'query_dist_ms')
+    grab(r'result collect:\s*([\d.]+)\s+ms', 'result_ms')
     grab(r'([\d.]+)\s+q/s', 'qps')
     return stats
 
