@@ -4,7 +4,7 @@ import os
 import re
 import time
 
-def run_shell_one(shell, db, sql_file):
+def run_shell_one(shell, db, sql_file, env=None):
     """Run a SQL file through the sqlite4 shell."""
     with open(sql_file, 'r') as f:
         proc = subprocess.run(
@@ -12,6 +12,7 @@ def run_shell_one(shell, db, sql_file):
             stdin=f,
             capture_output=True,
             text=True,
+            env=env,
         )
     if proc.returncode != 0:
         stdout_tail = "\n".join(proc.stdout.strip().split("\n")[-5:]) if proc.stdout else ""
@@ -21,7 +22,7 @@ def run_shell_one(shell, db, sql_file):
     return proc.stdout
 
 
-def run_shell(shell, db, sql_input):
+def run_shell(shell, db, sql_input, env=None):
     """Run SQL through shell in one session. Returns (stdout, stderr)."""
     if not sql_input.rstrip().endswith(".quit"):
         sql_input = sql_input + "\n.quit\n"
@@ -32,6 +33,7 @@ def run_shell(shell, db, sql_input):
         stderr=subprocess.PIPE,
         text=True,
         timeout=20000,
+        env=env,
     )
     if proc.returncode != 0 and proc.returncode != 1:
         err_lines = [l for l in proc.stderr.splitlines() if not l.startswith("[LSM]")]
@@ -40,12 +42,13 @@ def run_shell(shell, db, sql_input):
     return proc.stdout, proc.stderr
 
 
-def run_compact(compact_bin, db):
+def run_compact(compact_bin, db, env=None):
     proc = subprocess.run(
         [compact_bin, db],
         capture_output=True,
         text=True,
         timeout=20000,
+        env=env,
     )
     return proc.stderr
 
@@ -139,26 +142,18 @@ def parse_diskann_stats(stderr_text):
             stats[key] = conv(m.group(1))
 
     # Insert breakdown
-    grab(r'total:\s+([\d.]+)\s+ms', 'total_ms')
-    grab(r'search:\s+([\d.]+)\s+ms', 'search_ms')
-    grab(r'shadow insert:\s+([\d.]+)\s+ms', 'shadow_ins_ms')
-    grab(r'pass1 \(new\):\s+([\d.]+)\s+ms', 'pass1_ms')
-    grab(r'pass2 \(nbrs\):\s+([\d.]+)\s+ms', 'pass2_ms')
-    grab(r'(?:new node flush|flush new node):\s+([\d.]+)\s+ms', 'new_flush_ms')
-    grab(r'(?:KV|blob) reads:\s+(\d+)', 'kv_reads', int)
-    grab(r'(?:KV|blob) reads:\s+\d+\s+\(([\d.]+)\s+ms', 'kv_read_ms')
-    grab(r'writes:\s+(\d+)', 'kv_writes', int)
-    grab(r'writes:\s+\d+\s+\(([\d.]+)\s+ms', 'kv_write_ms')
-    # Autowork
-    grab(r'autowork:\s+([\d.]+)\s+ms', 'autowork_ms')
-    grab(r'in DiskANN writes:\s+([\d.]+)\s+ms', 'autowork_diskann_ms')
-    grab(r'outside DiskANN:\s+([\d.]+)\s+ms', 'autowork_outside_ms')
+    grab(r'table insert:\s+([\d.]+)\s+ms', 'table_insert_ms')
+    grab(r'index build:\s+([\d.]+)\s+ms', 'build_total_ms')
+    grab(r'build read I/O:\s+([\d.]+)\s+ms', 'build_read_ms')
+    grab(r'build write I/O:\s+([\d.]+)\s+ms', 'build_write_ms')
+    grab(r'build distance:\s+([\d.]+)\s+ms', 'build_dist_ms')
+    grab(r'LSM work during build:\s+([\d.]+)\s+ms', 'build_lsm_ms')
     # Query stats
-    grab(r'graph time:\s+([\d.]+)\s+ms', 'graph_ms')
-    grab(r'result time:\s+([\d.]+)\s+ms', 'result_ms')
+    grab(r'graph traversal:\s+([\d.]+)\s+ms', 'graph_ms')
+    grab(r'query read I/O:\s+([\d.]+)\s+ms', 'query_read_ms')
+    grab(r'query distance:\s+([\d.]+)\s+ms', 'query_dist_ms')
+    grab(r'result collect:\s+([\d.]+)\s+ms', 'result_ms')
     grab(r'([\d.]+)\s+q/s', 'qps')
-    if 'autowork_outside_ms' not in stats and 'autowork_ms' in stats:
-        stats['autowork_outside_ms'] = max(0.0, stats['autowork_ms'] - stats.get('autowork_diskann_ms', 0.0))
     return stats
 
 
@@ -194,9 +189,11 @@ def extract_c_stat_blocks(stderr_text):
 
 def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                    gt_results, k, db_dir, is_sqlite3=False, auto_compact=False,
-                   do_drop_cache=False):
+                   do_drop_cache=False, internal_io_timing=False):
     db_path = os.path.join(db_dir, f"bench_{label}.db")
     cleanup_db(db_path, is_sqlite3)
+    child_env = os.environ.copy()
+    child_env["DISKANN_IO_TIMING"] = "1" if internal_io_timing else "0"
 
     result = {"label": label}
     need_compact = not is_sqlite3 and not auto_compact and compact_bin
@@ -214,12 +211,12 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     schema_lines, insert_lines = split_schema_inserts(insert_sql)
 
     print(f"  [1/{n_phases}] Schema + Insert...")
-    run_shell(shell, db_path, "\n".join(schema_lines))  # ignore return tuple
+    run_shell(shell, db_path, "\n".join(schema_lines), env=child_env)  # ignore return tuple
 
     # Insert (timed — equivalent to ann-benchmarks fit())
     drop_caches(do_drop_cache)
     t0 = time.time()
-    ins_out, ins_err = run_shell(shell, db_path, "\n".join(insert_lines))
+    ins_out, ins_err = run_shell(shell, db_path, "\n".join(insert_lines), env=child_env)
     t_insert = time.time() - t0
 
     # Check for silent SQL errors (shell continues past errors but sets gHasError)
@@ -238,17 +235,18 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     ins_stats = parse_diskann_stats(ins_err)
     result["ins_stats"] = ins_stats
     print(f"        {t_insert:.1f}s, {size_before:.1f} MB")
-    if ins_stats.get('total_ms'):
-        build_s = ins_stats['total_ms'] / 1000
-        nr_s = ins_stats.get('kv_read_ms', 0) / 1000
-        ni_s = ins_stats.get('kv_write_ms', 0) / 1000
-        aw_s = ins_stats.get('autowork_ms', 0) / 1000
-        aw_diskann_s = ins_stats.get('autowork_diskann_ms', 0) / 1000
-        aw_outside_s = ins_stats.get('autowork_outside_ms', 0) / 1000
+    if ins_stats.get('build_total_ms') is not None:
+        table_s = ins_stats.get('table_insert_ms', 0) / 1000
+        build_s = ins_stats.get('build_total_ms', 0) / 1000
+        read_s = ins_stats.get('build_read_ms', 0) / 1000
+        write_s = ins_stats.get('build_write_ms', 0) / 1000
+        dist_s = ins_stats.get('build_dist_ms', 0) / 1000
+        lsm_s = ins_stats.get('build_lsm_ms', 0) / 1000
         print(
-            f"        Build={build_s:.1f}s  "
-            f"NodeRead={nr_s:.1f}s  NodeIns={ni_s:.1f}s  "
-            f"AutoWk={aw_s:.1f}s  AutoWkInBuild={aw_diskann_s:.1f}s  AutoWkOutside={aw_outside_s:.1f}s"
+            f"        TableIns={table_s:.1f}s  "
+            f"IndexBuild={build_s:.1f}s  BuildRead={read_s:.1f}s  "
+            f"BuildWrite={write_s:.1f}s  BuildDist={dist_s:.1f}s  "
+            f"LSMWork={lsm_s:.1f}s"
         )
     for block in extract_c_stat_blocks(ins_err):
         print(block)
@@ -258,7 +256,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         print(f"  [2/{n_phases}] Compacting...")
         drop_caches()
         t0 = time.time()
-        compact_out = run_compact(compact_bin, db_path)
+        compact_out = run_compact(compact_bin, db_path, env=child_env)
         t_compact = time.time() - t0
         size_after = file_size_mb(db_path)
         result["compact_time_s"] = round(t_compact, 2)
@@ -279,7 +277,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
 
     drop_caches(do_drop_cache)
     t0 = time.time()
-    ann_out, q_err = run_shell(shell, db_path, query_sql)
+    ann_out, q_err = run_shell(shell, db_path, query_sql, env=child_env)
     t_query = time.time() - t0
 
     q_err_lines = [l for l in q_err.splitlines() if l.startswith("Error:")]
@@ -300,7 +298,12 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     result["q_stats"] = q_stats
     print(f"        {t_query:.2f}s ({qps:.0f} q/s), {q} queries returned")
     if q_stats.get('graph_ms'):
-        print(f"        graph={q_stats['graph_ms']:.0f}ms")
+        print(
+            f"        Graph={q_stats.get('graph_ms', 0):.0f}ms  "
+            f"QueryRead={q_stats.get('query_read_ms', 0):.0f}ms  "
+            f"QueryDist={q_stats.get('query_dist_ms', 0):.0f}ms  "
+            f"Result={q_stats.get('result_ms', 0):.0f}ms"
+        )
     for block in extract_c_stat_blocks(q_err):
         print(block)
 
@@ -342,6 +345,8 @@ def main():
                              "1: skip compact_db (autowork=1 handles it)")
     parser.add_argument("--drop-cache", action="store_true",
                         help="Drop OS page cache before each timed phase (requires sudo)")
+    parser.add_argument("--internal-io-timing", type=int, default=0, choices=[0, 1],
+                        help="0: disable per-op internal read/write I/O timing, 1: enable it")
     args = parser.parse_args()
 
     page_sizes_kb = [int(x) for x in args.page_sizes.split(",")]
@@ -392,6 +397,7 @@ def main():
     print(f"Datasets:     {', '.join(n for n, _, _, _ in datasets)}")
     print(f"Configs:      {', '.join(l for l, _, _, _ in configs)}")
     print(f"Auto-compact: {'ON (no compact_db)' if auto_compact else 'OFF (use compact_db)'}")
+    print(f"Internal I/O timing: {'ON' if args.internal_io_timing else 'OFF'}")
     print(f"DB dir:       {args.db_dir}")
     print(f"Total runs:   {len(datasets) * len(configs)}")
 
@@ -411,7 +417,8 @@ def main():
             result = run_one_config(
                 run_label, shell, compact_bin, insert_sql, query_sql,
                 gt_results, args.k, args.db_dir, is_sqlite3=is_s3,
-                auto_compact=auto_compact, do_drop_cache=args.drop_cache
+                auto_compact=auto_compact, do_drop_cache=args.drop_cache,
+                internal_io_timing=bool(args.internal_io_timing)
             )
             ds_results.append(result)
 
@@ -425,17 +432,16 @@ def main():
     # Summary per dataset
     show_compact = not auto_compact
     for ds_name, ds_results in all_results.items():
-        # Build header: Insert group | Query group | Size
         ins_hdr = (
-            f"{'Overall':>8} {'Build':>8} {'NdRead':>8} {'NdIns':>8} "
-            f"{'AutoWk':>8} {'AW-Idx':>8} {'AW-Tbl':>8}"
+            f"{'Overall':>8} {'Table':>8} {'Build':>8} {'ReadIO':>8} "
+            f"{'WriteIO':>8} {'Dist':>8} {'LSM':>8}"
         )
         ins_sub = f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8}"
         if show_compact:
             ins_hdr += f" {'Compact':>8}"
             ins_sub += f" {'(s)':>8}"
-        q_hdr = f"{'Overall':>8} {'Q/s':>8} {'Recall':>8}"
-        q_sub = f"{'(s)':>8} {'':>8} {'@k':>8}"
+        q_hdr = f"{'Overall':>8} {'Graph':>8} {'ReadIO':>8} {'Dist':>8} {'Result':>8} {'Q/s':>8} {'Recall':>8}"
+        q_sub = f"{'(s)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} {'':>8} {'@k':>8}"
         hdr = f"{'Config':>16} |{ins_hdr} |{q_hdr} | {'Size':>8}"
         sub = f"{'':>16} |{ins_sub} |{q_sub} | {'(MB)':>8}"
         w = len(hdr)
@@ -451,20 +457,27 @@ def main():
         for r in ds_results:
             short_label = r['label'].replace(f"{ds_name}_", "")
             ist = r.get('ins_stats', {})
-            build_s = ist.get('total_ms', 0) / 1000
-            nr_s = ist.get('kv_read_ms', 0) / 1000
-            ni_s = ist.get('kv_write_ms', 0) / 1000
-            aw_s = ist.get('autowork_ms', 0) / 1000
-            aw_build_s = ist.get('autowork_diskann_ms', 0) / 1000
-            aw_out_s = ist.get('autowork_outside_ms', 0) / 1000
-            q_time_s = r['query_time_s']
+            table_s = ist.get('table_insert_ms', 0) / 1000
+            build_s = ist.get('build_total_ms', 0) / 1000
+            read_s = ist.get('build_read_ms', 0) / 1000
+            write_s = ist.get('build_write_ms', 0) / 1000
+            dist_s = ist.get('build_dist_ms', 0) / 1000
+            lsm_s = ist.get('build_lsm_ms', 0) / 1000
+            qst = r.get('q_stats', {})
             ins_vals = (f"{r['insert_time_s']:>8.1f} "
-                        f"{build_s:>8.1f} {nr_s:>8.1f} {ni_s:>8.1f} "
-                        f"{aw_s:>8.1f} {aw_build_s:>8.1f} {aw_out_s:>8.1f}")
+                        f"{table_s:>8.1f} {build_s:>8.1f} {read_s:>8.1f} "
+                        f"{write_s:>8.1f} {dist_s:>8.1f} {lsm_s:>8.1f}")
             if show_compact:
                 compact_str = f"{r['compact_time_s']:>8.1f}" if r['compact_time_s'] > 0 else f"{'---':>8}"
                 ins_vals += f" {compact_str}"
-            q_vals = f"{q_time_s:>8.1f} {r['query_per_sec']:>8.0f} {r['recall']:>8.4f}"
+            q_vals = (
+                f"{r['query_time_s']:>8.1f} "
+                f"{qst.get('graph_ms', 0):>8.1f} "
+                f"{qst.get('query_read_ms', 0):>8.1f} "
+                f"{qst.get('query_dist_ms', 0):>8.1f} "
+                f"{qst.get('result_ms', 0):>8.1f} "
+                f"{r['query_per_sec']:>8.0f} {r['recall']:>8.4f}"
+            )
             print(f"{short_label:>16} |{ins_vals} |{q_vals} | {r['compact_size_mb']:>8.1f}")
         print(f"{'='*w}")
 
