@@ -34,6 +34,7 @@
 #ifndef SQLITE4_OMIT_VECTOR
 
 #include "math.h"
+#include <stdlib.h>
 #include <time.h>
 #include <sys/time.h>
 #include "sqliteInt.h"
@@ -42,11 +43,6 @@
 /* Forward declarations for per-operation KV timing (accumulated in blobSpot functions) */
 static double g_totalKvReadMs;
 static double g_totalKvWriteMs;
-static int g_p1Visited;
-static int g_p1Replaced;
-static double g_p1ConvertMs;
-static double g_p1ReplaceMs;
-static double g_p1PruneMs;
 static long long g_searchEdgesTotal;
 static int g_searchVisitedTotal;
 
@@ -60,23 +56,18 @@ static int g_queryKvReads = 0;          /* KV read count during search only */
 static int g_queryNodesVisited = 0;     /* total nodes visited across all queries */
 static long long g_queryEdgesExamined = 0; /* total edges examined */
 static double g_queryDistanceMs = 0;    /* distance computation time */
-static int g_queryDistanceCalls = 0;    /* distance computation count */
+static double g_buildDistanceMs = 0;    /* distance computation during build */
 
-/* Auto-compaction timing globals from lsm_sorted.c / DiskANN write attribution */
+/* Auto-compaction timing globals from lsm_sorted.c */
 extern double g_autoworkTotalMs;
-extern int g_autoworkCalls;
-extern int g_autoworkPages;
-double g_diskannAutoworkMs = 0.0;
+static int g_ioTimingEnabled = -1;
 
-static double diskAnnAutoworkSnapshot(void){
-  return g_autoworkTotalMs;
-}
-
-static void diskAnnAutoworkAccumulate(double beforeMs){
-  double deltaMs = g_autoworkTotalMs - beforeMs;
-  if( deltaMs > 0.0 ){
-    g_diskannAutoworkMs += deltaMs;
+static int diskAnnIoTimingEnabled(void){
+  if( g_ioTimingEnabled < 0 ){
+    const char *zEnv = getenv("DISKANN_IO_TIMING");
+    g_ioTimingEnabled = (zEnv && zEnv[0] && zEnv[0] != '0') ? 1 : 0;
   }
+  return g_ioTimingEnabled;
 }
 
 // #define SQLITE4_VECTOR_TRACE
@@ -376,7 +367,8 @@ int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot,
 
   {
     struct timespec _kvr0, _kvr1;
-    clock_gettime(CLOCK_MONOTONIC, &_kvr0);
+    int doTiming = diskAnnIoTimingEnabled();
+    if( doTiming ) clock_gettime(CLOCK_MONOTONIC, &_kvr0);
 
     /* Lazily open persistent read cursor on first use */
     if( pIndex->pReadCsr == NULL ){
@@ -403,9 +395,11 @@ int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot,
       memcpy(pBlobSpot->pBuffer, pBlob, nBufferSize);
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &_kvr1);
-    g_totalKvReadMs += (_kvr1.tv_sec - _kvr0.tv_sec)*1000.0
-                     + (_kvr1.tv_nsec - _kvr0.tv_nsec)/1e6;
+    if( doTiming ){
+      clock_gettime(CLOCK_MONOTONIC, &_kvr1);
+      g_totalKvReadMs += (_kvr1.tv_sec - _kvr0.tv_sec)*1000.0
+                       + (_kvr1.tv_nsec - _kvr0.tv_nsec)/1e6;
+    }
   }
 
   pIndex->nReads++;
@@ -426,7 +420,6 @@ int blobSpotFlush(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot) {
   int nRec;
   sqlite4_env *pEnv = pIndex->db->pEnv;
   struct timespec _kvw0, _kvw1;
-  double autoworkBeforeMs;
 
   nKey = blobSpotBuildKey(pIndex, (i64)pBlobSpot->nRowid, aKey);
 
@@ -436,13 +429,13 @@ int blobSpotFlush(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot) {
   nRec = blobSpotEncodeRecord((i64)pBlobSpot->nRowid, pBlobSpot->pBuffer,
                               pBlobSpot->nBufferSize, aRec);
 
-  clock_gettime(CLOCK_MONOTONIC, &_kvw0);
-  autoworkBeforeMs = diskAnnAutoworkSnapshot();
+  if( diskAnnIoTimingEnabled() ) clock_gettime(CLOCK_MONOTONIC, &_kvw0);
   rc = sqlite4KVStoreReplace(pIndex->db->aDb[0].pKV, aKey, nKey, aRec, nRec);
-  diskAnnAutoworkAccumulate(autoworkBeforeMs);
-  clock_gettime(CLOCK_MONOTONIC, &_kvw1);
-  g_totalKvWriteMs += (_kvw1.tv_sec - _kvw0.tv_sec)*1000.0
-                    + (_kvw1.tv_nsec - _kvw0.tv_nsec)/1e6;
+  if( diskAnnIoTimingEnabled() ){
+    clock_gettime(CLOCK_MONOTONIC, &_kvw1);
+    g_totalKvWriteMs += (_kvw1.tv_sec - _kvw0.tv_sec)*1000.0
+                      + (_kvw1.tv_nsec - _kvw0.tv_nsec)/1e6;
+  }
 
   sqlite4_free(pEnv, aRec);
 
@@ -937,8 +930,6 @@ static int diskAnnInsertShadowRow(const DiskAnnIndex *pIndex, const VectorInRow 
   char *zSql = NULL;
   u8 *pZero = NULL;
   sqlite4_env *pEnv = pIndex->db->pEnv;
-  double autoworkBeforeMs = 0.0;
-
   s_shadowInsertCount++;
   *pRowid = pVectorInRow->nRowid;
 
@@ -976,9 +967,7 @@ static int diskAnnInsertShadowRow(const DiskAnnIndex *pIndex, const VectorInRow 
     goto out;
   }
 
-  autoworkBeforeMs = diskAnnAutoworkSnapshot();
   rc = sqlite4_step(pStmt);
-  diskAnnAutoworkAccumulate(autoworkBeforeMs);
   if( rc != SQLITE4_DONE ){
     rc = SQLITE4_ERROR;
     goto out;
@@ -997,7 +986,6 @@ out:
 static int diskAnnDeleteShadowRow(const DiskAnnIndex *pIndex, i64 nRowid){
   int rc;
   sqlite4_stmt *pStmt = NULL;
-  double autoworkBeforeMs = 0.0;
   char *zSql = sqlite4MPrintf(
       pIndex->db,
       "DELETE FROM \"%w\".%s WHERE index_key = ?",
@@ -1017,9 +1005,7 @@ static int diskAnnDeleteShadowRow(const DiskAnnIndex *pIndex, i64 nRowid){
   if( rc != SQLITE4_OK ){
     goto out;
   }
-  autoworkBeforeMs = diskAnnAutoworkSnapshot();
   rc = sqlite4_step(pStmt);
-  diskAnnAutoworkAccumulate(autoworkBeforeMs);
   if( rc != SQLITE4_DONE ){
     rc = SQLITE4_ERROR;
     goto out;
@@ -1113,12 +1099,12 @@ void bufferDelete(u8 *aBuffer, int nSize, int iDelete, int nItemSize) {
 ** DiskANN internals
 **************************************************************************/
 
-static int g_distTimingEnabled = 0;  /* only enabled during search queries */
+static int g_distTimingMode = 0;  /* 0=off, 1=query, 2=build */
 
 static float diskAnnVectorDistance(const DiskAnnIndex *pIndex, const Vector *pVec1, const Vector *pVec2){
   float result;
   struct timespec _d0, _d1;
-  if( g_distTimingEnabled ){
+  if( g_distTimingMode ){
     clock_gettime(CLOCK_MONOTONIC, &_d0);
   }
   switch( pIndex->nDistanceFunc ){
@@ -1133,11 +1119,16 @@ static float diskAnnVectorDistance(const DiskAnnIndex *pIndex, const Vector *pVe
       result = 0.0;
       break;
   }
-  if( g_distTimingEnabled ){
+  if( g_distTimingMode ){
+    double ms;
     clock_gettime(CLOCK_MONOTONIC, &_d1);
-    g_queryDistanceMs += (_d1.tv_sec - _d0.tv_sec)*1000.0
-                       + (_d1.tv_nsec - _d0.tv_nsec)/1e6;
-    g_queryDistanceCalls++;
+    ms = (_d1.tv_sec - _d0.tv_sec)*1000.0
+       + (_d1.tv_nsec - _d0.tv_nsec)/1e6;
+    if( g_distTimingMode==1 ){
+      g_queryDistanceMs += ms;
+    }else if( g_distTimingMode==2 ){
+      g_buildDistanceMs += ms;
+    }
   }
   return result;
 }
@@ -1598,9 +1589,9 @@ int diskAnnSearch(
 
   /* Graph traversal (timed) */
   clock_gettime(CLOCK_MONOTONIC, &_qg0);
-  g_distTimingEnabled = 1;
+  g_distTimingMode = 1;
   rc = diskAnnSearchInternal(pIndex, &ctx, nStartRowid, pzErrMsg);
-  g_distTimingEnabled = 0;
+  g_distTimingMode = 0;
   clock_gettime(CLOCK_MONOTONIC, &_qg1);
   if( rc != SQLITE4_OK ){
     goto out;
@@ -1659,26 +1650,15 @@ int diskAnnInsert(
   const VectorInRow *pVectorInRow,
   char **pzErrMsg
 ){
-  static int s_insertCallCount = 0;
-  static struct timeval s_lastTime = {0, 0};
-  struct timeval now;
   int rc, first = 0;
-  s_insertCallCount++;
-  if( s_insertCallCount == 1 ){
-    gettimeofday(&s_lastTime, NULL);
-  }
-  if( s_insertCallCount % 10000 == 0 ){
-    gettimeofday(&now, NULL);
-    double elapsed = (now.tv_sec - s_lastTime.tv_sec) + (now.tv_usec - s_lastTime.tv_usec) / 1e6;
-    fprintf(stderr, "[DEBUG] diskAnnInsert #%d  elapsed=%.1fs\n",
-      s_insertCallCount, elapsed);
-    s_lastTime = now;
-  }
   u64 nStartRowid, nNewRowid;
   BlobSpot *pBlobSpot = NULL;
   DiskAnnNode *pVisited;
   DiskAnnSearchCtx ctx;
   VectorPair vInsert, vCandidate;
+  double buildReadStart = 0.0, buildWriteStart = 0.0, buildDistStart = 0.0;
+  double insertLsmStart = g_autoworkTotalMs;
+  double buildReadMs = 0.0, buildWriteMs = 0.0, buildDistMs = 0.0;
   vInsert.pNode = NULL; vInsert.pEdge = NULL;
   vCandidate.pNode = NULL; vCandidate.pEdge = NULL;
 
@@ -1722,11 +1702,19 @@ int diskAnnInsert(
   }
   if( !first ){
     struct timespec _ts0, _ts1;
+    buildReadStart = g_totalKvReadMs;
+    buildWriteStart = g_totalKvWriteMs;
+    buildDistStart = g_buildDistanceMs;
     clock_gettime(CLOCK_MONOTONIC, &_ts0);
+    g_distTimingMode = 2;
     rc = diskAnnSearchInternal(pIndex, &ctx, nStartRowid, pzErrMsg);
+    g_distTimingMode = 0;
     clock_gettime(CLOCK_MONOTONIC, &_ts1);
     pIndex->totalSearchMs += (_ts1.tv_sec - _ts0.tv_sec)*1000.0
                            + (_ts1.tv_nsec - _ts0.tv_nsec)/1e6;
+    buildReadMs += g_totalKvReadMs - buildReadStart;
+    buildWriteMs += g_totalKvWriteMs - buildWriteStart;
+    buildDistMs += g_buildDistanceMs - buildDistStart;
     if( rc != SQLITE4_OK ){
       goto out;
     }
@@ -1762,45 +1750,29 @@ int diskAnnInsert(
   }
 
   /* first pass - add all visited nodes as potential neighbours of new node */
+  buildReadStart = g_totalKvReadMs;
+  buildWriteStart = g_totalKvWriteMs;
+  buildDistStart = g_buildDistanceMs;
+  g_distTimingMode = 2;
   {
-    struct timespec _p1a, _p1b, _t0, _t1;
-    int nVisitedP1 = 0, nReplacedP1 = 0;
-    double replaceMs = 0, pruneMs = 0, convertMs = 0;
+    struct timespec _p1a, _p1b;
     clock_gettime(CLOCK_MONOTONIC, &_p1a);
     for(pVisited = ctx.visitedList; pVisited != NULL; pVisited = pVisited->pNext){
       Vector nodeVector;
       int iReplace;
       float nodeToNew;
-      nVisitedP1++;
-
-      clock_gettime(CLOCK_MONOTONIC, &_t0);
       nodeBinVector(pIndex, pVisited->pBlobSpot, &nodeVector);
       loadVectorPair(&vCandidate, &nodeVector);
-      clock_gettime(CLOCK_MONOTONIC, &_t1);
-      convertMs += (_t1.tv_sec - _t0.tv_sec)*1000.0 + (_t1.tv_nsec - _t0.tv_nsec)/1e6;
-
-      clock_gettime(CLOCK_MONOTONIC, &_t0);
       iReplace = diskAnnReplaceEdgeIdx(pIndex, pBlobSpot, pVisited->nRowid, &vCandidate, &vInsert, &nodeToNew);
-      clock_gettime(CLOCK_MONOTONIC, &_t1);
-      replaceMs += (_t1.tv_sec - _t0.tv_sec)*1000.0 + (_t1.tv_nsec - _t0.tv_nsec)/1e6;
       if( iReplace == -1 ){
         continue;
       }
-      nReplacedP1++;
       nodeBinReplaceEdge(pIndex, pBlobSpot, iReplace, pVisited->nRowid, nodeToNew, vCandidate.pEdge);
-      clock_gettime(CLOCK_MONOTONIC, &_t0);
       diskAnnPruneEdges(pIndex, pBlobSpot, iReplace, &vInsert);
-      clock_gettime(CLOCK_MONOTONIC, &_t1);
-      pruneMs += (_t1.tv_sec - _t0.tv_sec)*1000.0 + (_t1.tv_nsec - _t0.tv_nsec)/1e6;
     }
     clock_gettime(CLOCK_MONOTONIC, &_p1b);
     pIndex->totalPass1Ms += (_p1b.tv_sec - _p1a.tv_sec)*1000.0
                           + (_p1b.tv_nsec - _p1a.tv_nsec)/1e6;
-    g_p1Visited += nVisitedP1;
-    g_p1Replaced += nReplacedP1;
-    g_p1ConvertMs += convertMs;
-    g_p1ReplaceMs += replaceMs;
-    g_p1PruneMs += pruneMs;
   }
 
   /* second pass - add new node as potential neighbour of all visited nodes */
@@ -1829,9 +1801,11 @@ int diskAnnInsert(
     pIndex->totalPass2Ms += (_p2b.tv_sec - _p2a.tv_sec)*1000.0
                           + (_p2b.tv_nsec - _p2a.tv_nsec)/1e6;
   }
+  g_distTimingMode = 0;
 
   rc = SQLITE4_OK;
 out:
+  g_distTimingMode = 0;
   deinitVectorPair(&vInsert);
   deinitVectorPair(&vCandidate);
   if( rc == SQLITE4_OK ){
@@ -1843,6 +1817,14 @@ out:
                              + (_fl1.tv_nsec - _fl0.tv_nsec)/1e6;
     if( rc != SQLITE4_OK ){
       *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): failed to flush blob");
+    }else{
+      buildReadMs += g_totalKvReadMs - buildReadStart;
+      buildWriteMs += g_totalKvWriteMs - buildWriteStart;
+      buildDistMs += g_buildDistanceMs - buildDistStart;
+      pIndex->totalBuildReadMs += buildReadMs;
+      pIndex->totalBuildWriteMs += buildWriteMs;
+      pIndex->totalBuildDistMs += buildDistMs;
+      pIndex->totalBuildLsmMs += g_autoworkTotalMs - insertLsmStart;
     }
   }
   if( pBlobSpot != NULL ){
@@ -2069,9 +2051,11 @@ static double g_totalShadowInsMs = 0;
 static double g_totalPass1Ms = 0;
 static double g_totalPass2Ms = 0;
 static double g_totalNewFlushMs = 0;
+static double g_totalBuildReadMs = 0;
+static double g_totalBuildWriteMs = 0;
+static double g_totalBuildDistMs = 0;
+static double g_totalBuildLsmMs = 0;
 static int g_totalInsertCount = 0;
-static int g_totalReads = 0;
-static int g_totalWrites = 0;
 static int g_atexitRegistered = 0;
 
 static void diskAnnPrintSearchStats(void){
@@ -2081,69 +2065,34 @@ static void diskAnnPrintSearchStats(void){
     double avgResult = g_queryResultMs / g_queryCount;
     double avgKvRead = g_queryKvReadMs / g_queryCount;
     double avgDist = g_queryDistanceMs / g_queryCount;
-    double avgVisited = (double)g_queryNodesVisited / g_queryCount;
-    double avgEdges = (double)g_queryEdgesExamined / g_queryCount;
-    double avgKvCount = (double)g_queryKvReads / g_queryCount;
-    double avgDistCalls = (double)g_queryDistanceCalls / g_queryCount;
     double qps = g_queryTotalMs > 0 ? g_queryCount / (g_queryTotalMs / 1000.0) : 0;
     fprintf(stderr, "\n=== diskAnn search breakdown (%d queries) ===\n", g_queryCount);
     fprintf(stderr, "  total:          %8.1f ms  (avg %.3f ms/q, %.0f q/s)\n",
             g_queryTotalMs, avgTotal, qps);
     fprintf(stderr, "  graph traversal:%8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             g_queryGraphMs, avgGraph, g_queryGraphMs/g_queryTotalMs*100);
-    fprintf(stderr, "    KV read I/O:  %8.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
+    fprintf(stderr, "    query read I/O:%7.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
             g_queryKvReadMs, avgKvRead,
             g_queryGraphMs > 0 ? g_queryKvReadMs/g_queryGraphMs*100 : 0);
-    fprintf(stderr, "    distance:     %8.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
+    fprintf(stderr, "    query distance:%6.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
             g_queryDistanceMs, avgDist,
             g_queryGraphMs > 0 ? g_queryDistanceMs/g_queryGraphMs*100 : 0);
     fprintf(stderr, "  result collect: %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             g_queryResultMs, avgResult, g_queryResultMs/g_queryTotalMs*100);
-    fprintf(stderr, "  KV reads: %d total (avg %.1f/q, avg %.4f ms/read)\n",
-            g_queryKvReads, avgKvCount,
-            g_queryKvReads > 0 ? g_queryKvReadMs / g_queryKvReads : 0);
-    fprintf(stderr, "  nodes visited: %d total (avg %.1f/q)\n",
-            g_queryNodesVisited, avgVisited);
-    fprintf(stderr, "  edges examined: %lld total (avg %.1f/q, avg %.1f edges/node)\n",
-            g_queryEdgesExamined, avgEdges,
-            g_queryNodesVisited > 0 ? (double)g_queryEdgesExamined / g_queryNodesVisited : 0);
-    fprintf(stderr, "  distance calls: %d total (avg %.1f/q)\n",
-            g_queryDistanceCalls, avgDistCalls);
     fprintf(stderr, "================================================\n");
   }
 }
 
 static void diskAnnPrintInsertStats(void){
   if( g_totalInsertCount > 0 ){
-    double total = g_totalSearchMs + g_totalShadowInsMs + g_totalPass1Ms + g_totalPass2Ms + g_totalNewFlushMs;
-    double autoworkInBuild = g_diskannAutoworkMs;
-    double autoworkOutsideBuild = g_autoworkTotalMs - g_diskannAutoworkMs;
-    if( autoworkOutsideBuild < 0.0 ) autoworkOutsideBuild = 0.0;
+    double buildTotal = g_totalSearchMs + g_totalPass1Ms + g_totalPass2Ms + g_totalNewFlushMs;
     fprintf(stderr, "\n=== diskAnn insert breakdown (%d inserts) ===\n", g_totalInsertCount);
-    fprintf(stderr, "  search:         %8.1f ms  (%5.1f%%)\n", g_totalSearchMs, g_totalSearchMs/total*100);
-    fprintf(stderr, "  shadow insert:  %8.1f ms  (%5.1f%%)\n", g_totalShadowInsMs, g_totalShadowInsMs/total*100);
-    fprintf(stderr, "  pass1 (new):    %8.1f ms  (%5.1f%%)\n", g_totalPass1Ms, g_totalPass1Ms/total*100);
-    fprintf(stderr, "  pass2 (nbrs):   %8.1f ms  (%5.1f%%)\n", g_totalPass2Ms, g_totalPass2Ms/total*100);
-    fprintf(stderr, "  new node flush: %8.1f ms  (%5.1f%%)\n", g_totalNewFlushMs, g_totalNewFlushMs/total*100);
-    fprintf(stderr, "  total:          %8.1f ms\n", total);
-    fprintf(stderr, "  KV reads: %d (%.1f ms, %.4f ms/op)  writes: %d (%.1f ms, %.4f ms/op)\n",
-            g_totalReads, g_totalKvReadMs,
-            g_totalReads > 0 ? g_totalKvReadMs / g_totalReads : 0,
-            g_totalWrites, g_totalKvWriteMs,
-            g_totalWrites > 0 ? g_totalKvWriteMs / g_totalWrites : 0);
-    fprintf(stderr, "  pass1: visited=%d, replaced=%d (%.1f visited/insert, %.1f replaced/insert)\n",
-            g_p1Visited, g_p1Replaced,
-            (double)g_p1Visited / g_totalInsertCount,
-            (double)g_p1Replaced / g_totalInsertCount);
-    fprintf(stderr, "  pass1 detail: convert=%.1fms, replaceIdx=%.1fms, prune=%.1fms\n",
-            g_p1ConvertMs, g_p1ReplaceMs, g_p1PruneMs);
-    fprintf(stderr, "  search: totalVisited=%d totalEdges=%lld avgEdges=%.1f\n",
-            g_searchVisitedTotal, g_searchEdgesTotal,
-            g_searchVisitedTotal > 0 ? (double)g_searchEdgesTotal / g_searchVisitedTotal : 0.0);
-    fprintf(stderr, "  autowork: %.1f ms (%d calls, %d pages)\n",
-            g_autoworkTotalMs, g_autoworkCalls, g_autoworkPages);
-    fprintf(stderr, "    in DiskANN writes:   %.1f ms\n", autoworkInBuild);
-    fprintf(stderr, "    outside DiskANN:     %.1f ms\n", autoworkOutsideBuild);
+    fprintf(stderr, "  table insert:   %8.1f ms\n", g_totalShadowInsMs);
+    fprintf(stderr, "  index build:    %8.1f ms\n", buildTotal);
+    fprintf(stderr, "    build read I/O:%7.1f ms\n", g_totalBuildReadMs);
+    fprintf(stderr, "    build write I/O:%6.1f ms\n", g_totalBuildWriteMs);
+    fprintf(stderr, "    build distance:%7.1f ms\n", g_totalBuildDistMs);
+    fprintf(stderr, "    LSM work during build: %.1f ms\n", g_totalBuildLsmMs);
     fprintf(stderr, "================================================\n");
   }
 }
@@ -2157,8 +2106,10 @@ void diskAnnCloseIndex(DiskAnnIndex *pIndex){
     g_totalPass1Ms += pIndex->totalPass1Ms;
     g_totalPass2Ms += pIndex->totalPass2Ms;
     g_totalNewFlushMs += pIndex->totalNewFlushMs;
-    g_totalReads += pIndex->nReads;
-    g_totalWrites += pIndex->nWrites;
+    g_totalBuildReadMs += pIndex->totalBuildReadMs;
+    g_totalBuildWriteMs += pIndex->totalBuildWriteMs;
+    g_totalBuildDistMs += pIndex->totalBuildDistMs;
+    g_totalBuildLsmMs += pIndex->totalBuildLsmMs;
     g_totalInsertCount++;
   }
   if( !g_atexitRegistered ){

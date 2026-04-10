@@ -4,6 +4,26 @@ import os
 import re
 import time
 
+TIME_MARKER = "__TIME__"
+
+
+def parse_time_stats(stderr_text):
+    stats = {}
+    kept = []
+    for line in stderr_text.splitlines():
+        if line.startswith(TIME_MARKER):
+            m = re.search(r"real=([\d.]+)\s+user=([\d.]+)\s+sys=([\d.]+)", line)
+            if m:
+                stats["real_s"] = float(m.group(1))
+                stats["user_s"] = float(m.group(2))
+                stats["sys_s"] = float(m.group(3))
+        else:
+            kept.append(line)
+    cleaned = "\n".join(kept)
+    if stderr_text.endswith("\n"):
+        cleaned += "\n"
+    return cleaned, stats
+
 def run_shell_one(shell, db, sql_file, env=None):
     """Run a SQL file through the sqlite4 shell."""
     with open(sql_file, 'r') as f:
@@ -23,11 +43,15 @@ def run_shell_one(shell, db, sql_file, env=None):
 
 
 def run_shell(shell, db, sql_input, env=None):
-    """Run SQL through shell in one session. Returns (stdout, stderr)."""
+    """Run SQL through shell in one session. Returns (stdout, stderr, time_stats)."""
     if not sql_input.rstrip().endswith(".quit"):
         sql_input = sql_input + "\n.quit\n"
+    cmd = [shell, db]
+    use_time = os.path.exists("/usr/bin/time")
+    if use_time:
+        cmd = ["/usr/bin/time", "-f", f"{TIME_MARKER} real=%e user=%U sys=%S"] + cmd
     proc = subprocess.run(
-        [shell, db],
+        cmd,
         input=sql_input,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -35,22 +59,27 @@ def run_shell(shell, db, sql_input, env=None):
         timeout=20000,
         env=env,
     )
+    stderr_text, time_stats = parse_time_stats(proc.stderr)
     if proc.returncode != 0 and proc.returncode != 1:
-        err_lines = [l for l in proc.stderr.splitlines() if not l.startswith("[LSM]")]
-        err_msg = "\n".join(err_lines[-10:]) if err_lines else proc.stderr[-500:]
+        err_lines = [l for l in stderr_text.splitlines() if not l.startswith("[LSM]")]
+        err_msg = "\n".join(err_lines[-10:]) if err_lines else stderr_text[-500:]
         raise RuntimeError(f"shell error (rc={proc.returncode}): {err_msg}")
-    return proc.stdout, proc.stderr
+    return proc.stdout, stderr_text, time_stats
 
 
 def run_compact(compact_bin, db, env=None):
+    cmd = [compact_bin, db]
+    if os.path.exists("/usr/bin/time"):
+        cmd = ["/usr/bin/time", "-f", f"{TIME_MARKER} real=%e user=%U sys=%S"] + cmd
     proc = subprocess.run(
-        [compact_bin, db],
+        cmd,
         capture_output=True,
         text=True,
         timeout=20000,
         env=env,
     )
-    return proc.stderr
+    stderr_text, time_stats = parse_time_stats(proc.stderr)
+    return stderr_text, time_stats
 
 
 def drop_caches(enabled=True):
@@ -216,7 +245,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     # Insert (timed — equivalent to ann-benchmarks fit())
     drop_caches(do_drop_cache)
     t0 = time.time()
-    ins_out, ins_err = run_shell(shell, db_path, "\n".join(insert_lines), env=child_env)
+    ins_out, ins_err, ins_time = run_shell(shell, db_path, "\n".join(insert_lines), env=child_env)
     t_insert = time.time() - t0
 
     # Check for silent SQL errors (shell continues past errors but sets gHasError)
@@ -232,9 +261,16 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     size_before = file_size_mb(db_path)
     result["insert_time_s"] = round(t_insert, 2)
     result["insert_size_mb"] = round(size_before, 1)
+    result["insert_time_stats"] = ins_time
     ins_stats = parse_diskann_stats(ins_err)
     result["ins_stats"] = ins_stats
     print(f"        {t_insert:.1f}s, {size_before:.1f} MB")
+    if ins_time:
+        print(
+            f"        time: real={ins_time.get('real_s', 0):.2f}s  "
+            f"user={ins_time.get('user_s', 0):.2f}s  "
+            f"sys={ins_time.get('sys_s', 0):.2f}s"
+        )
     if ins_stats.get('build_total_ms') is not None:
         table_s = ins_stats.get('table_insert_ms', 0) / 1000
         build_s = ins_stats.get('build_total_ms', 0) / 1000
@@ -256,12 +292,19 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         print(f"  [2/{n_phases}] Compacting...")
         drop_caches()
         t0 = time.time()
-        compact_out = run_compact(compact_bin, db_path, env=child_env)
+        compact_out, compact_time_stats = run_compact(compact_bin, db_path, env=child_env)
         t_compact = time.time() - t0
         size_after = file_size_mb(db_path)
         result["compact_time_s"] = round(t_compact, 2)
         result["compact_size_mb"] = round(size_after, 1)
+        result["compact_time_stats"] = compact_time_stats
         print(f"        {t_compact:.1f}s, {size_before:.1f} -> {size_after:.1f} MB")
+        if compact_time_stats:
+            print(
+                f"        time: real={compact_time_stats.get('real_s', 0):.2f}s  "
+                f"user={compact_time_stats.get('user_s', 0):.2f}s  "
+                f"sys={compact_time_stats.get('sys_s', 0):.2f}s"
+            )
         for line in compact_out.split("\n"):
             if line.startswith("Final:"):
                 result["structure"] = line.strip()
@@ -277,7 +320,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
 
     drop_caches(do_drop_cache)
     t0 = time.time()
-    ann_out, q_err = run_shell(shell, db_path, query_sql, env=child_env)
+    ann_out, q_err, q_time_stats = run_shell(shell, db_path, query_sql, env=child_env)
     t_query = time.time() - t0
 
     q_err_lines = [l for l in q_err.splitlines() if l.startswith("Error:")]
@@ -294,9 +337,16 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     result["query_time_s"] = round(t_query, 2)
     result["queries"] = q
     result["query_per_sec"] = round(qps, 1)
+    result["query_time_stats"] = q_time_stats
     q_stats = parse_diskann_stats(q_err)
     result["q_stats"] = q_stats
     print(f"        {t_query:.2f}s ({qps:.0f} q/s), {q} queries returned")
+    if q_time_stats:
+        print(
+            f"        time: real={q_time_stats.get('real_s', 0):.2f}s  "
+            f"user={q_time_stats.get('user_s', 0):.2f}s  "
+            f"sys={q_time_stats.get('sys_s', 0):.2f}s"
+        )
     if q_stats.get('graph_ms'):
         print(
             f"        Graph={q_stats.get('graph_ms', 0):.0f}ms  "

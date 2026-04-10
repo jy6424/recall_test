@@ -1656,8 +1656,9 @@ int diskAnnInsert(
   DiskAnnNode *pVisited;
   DiskAnnSearchCtx ctx;
   VectorPair vInsert, vCandidate;
-  double buildReadStart = 0.0, buildWriteStart = 0.0, buildDistStart = 0.0, buildLsmStart = 0.0;
-  double buildReadMs = 0.0, buildWriteMs = 0.0, buildDistMs = 0.0, buildLsmMs = 0.0;
+  double buildReadStart = 0.0, buildWriteStart = 0.0, buildDistStart = 0.0;
+  double insertLsmStart = g_autoworkTotalMs;
+  double buildReadMs = 0.0, buildWriteMs = 0.0, buildDistMs = 0.0;
   vInsert.pNode = NULL; vInsert.pEdge = NULL;
   vCandidate.pNode = NULL; vCandidate.pEdge = NULL;
 
@@ -1704,7 +1705,6 @@ int diskAnnInsert(
     buildReadStart = g_totalKvReadMs;
     buildWriteStart = g_totalKvWriteMs;
     buildDistStart = g_buildDistanceMs;
-    buildLsmStart = g_autoworkTotalMs;
     clock_gettime(CLOCK_MONOTONIC, &_ts0);
     g_distTimingMode = 2;
     rc = diskAnnSearchInternal(pIndex, &ctx, nStartRowid, pzErrMsg);
@@ -1715,7 +1715,6 @@ int diskAnnInsert(
     buildReadMs += g_totalKvReadMs - buildReadStart;
     buildWriteMs += g_totalKvWriteMs - buildWriteStart;
     buildDistMs += g_buildDistanceMs - buildDistStart;
-    buildLsmMs += g_autoworkTotalMs - buildLsmStart;
     if( rc != SQLITE4_OK ){
       goto out;
     }
@@ -1754,7 +1753,6 @@ int diskAnnInsert(
   buildReadStart = g_totalKvReadMs;
   buildWriteStart = g_totalKvWriteMs;
   buildDistStart = g_buildDistanceMs;
-  buildLsmStart = g_autoworkTotalMs;
   g_distTimingMode = 2;
   {
     struct timespec _p1a, _p1b;
@@ -1823,11 +1821,10 @@ out:
       buildReadMs += g_totalKvReadMs - buildReadStart;
       buildWriteMs += g_totalKvWriteMs - buildWriteStart;
       buildDistMs += g_buildDistanceMs - buildDistStart;
-      buildLsmMs += g_autoworkTotalMs - buildLsmStart;
       pIndex->totalBuildReadMs += buildReadMs;
       pIndex->totalBuildWriteMs += buildWriteMs;
       pIndex->totalBuildDistMs += buildDistMs;
-      pIndex->totalBuildLsmMs += buildLsmMs;
+      pIndex->totalBuildLsmMs += g_autoworkTotalMs - insertLsmStart;
     }
   }
   if( pBlobSpot != NULL ){
