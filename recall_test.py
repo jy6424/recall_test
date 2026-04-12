@@ -281,6 +281,11 @@ def split_schema_inserts(sql_text):
     return schema, inserts
 
 
+def build_schema_sql(schema_lines, page_size_kb):
+    pragma = f"PRAGMA page_size={page_size_kb * 1024};"
+    return "\n".join([pragma] + schema_lines)
+
+
 def parse_output_to_results(output, k):
     """Parse shell output into list of sets of IDs, chunked by k."""
     id_lines = []
@@ -573,9 +578,9 @@ def main():
                         help="Comma-separated dataset names (default: glove,sift)")
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--sqlite4-dir", type=str, default="./sqlite4_lsm",
-                        help="e.g. ~/sqlite4_lsm containing 4kb/, 16kb/, ... with sqlite4 + compact_db")
+                        help="Directory containing sqlite4 and optional compact_db")
     parser.add_argument("--sqlite3-dir", type=str, default="./sqlite3_libsql",
-                        help="e.g. ~/sqlite3_libsql containing 4kb/, 16kb/, ... with sqlite3")
+                        help="Directory containing sqlite3")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
     parser.add_argument("--auto-compact", type=int, default=1, choices=[0, 1],
@@ -608,26 +613,26 @@ def main():
         print("Error: no valid datasets found.")
         return 1
 
-    # Build configs: (label, shell, compact_bin_or_None, is_sqlite3)
+    # Build configs: (label, shell, compact_bin_or_None, is_sqlite3, page_size_kb)
     configs = []
 
     if args.sqlite4_dir:
-        for ps_kb in page_sizes_kb:
-            shell = os.path.join(args.sqlite4_dir, f"{ps_kb}kb", "sqlite4")
-            compact = os.path.join(args.sqlite4_dir, f"{ps_kb}kb", "compact_db")
-            if not os.path.isfile(shell):
-                print(f"Warning: {ps_kb}kb sqlite4 missing, skipping")
-                continue
+        shell = os.path.join(args.sqlite4_dir, "sqlite4")
+        compact = os.path.join(args.sqlite4_dir, "compact_db")
+        if not os.path.isfile(shell):
+            print("Warning: sqlite4 binary missing, skipping sqlite4 configs")
+        else:
             compact_bin = compact if os.path.isfile(compact) else None
-            configs.append((f"lsm_{ps_kb}kb", shell, compact_bin, False))
+            for ps_kb in page_sizes_kb:
+                configs.append((f"lsm_{ps_kb}kb", shell, compact_bin, False, ps_kb))
 
     if args.sqlite3_dir:
-        for ps_kb in page_sizes_kb:
-            shell = os.path.join(args.sqlite3_dir, f"{ps_kb}kb", "sqlite3")
-            if os.path.isfile(shell):
-                configs.append((f"sqlite3_{ps_kb}kb", shell, None, True))
-            else:
-                print(f"Warning: {ps_kb}kb sqlite3 missing, skipping")
+        shell = os.path.join(args.sqlite3_dir, "sqlite3")
+        if not os.path.isfile(shell):
+            print("Warning: sqlite3 binary missing, skipping sqlite3 configs")
+        else:
+            for ps_kb in page_sizes_kb:
+                configs.append((f"sqlite3_{ps_kb}kb", shell, None, True, ps_kb))
 
     if not configs:
         print("Error: no valid configurations found.")
@@ -654,10 +659,16 @@ def main():
         print(f"  Loaded {len(gt_results)} groundtruth queries")
 
         ds_results = []
-        for label, shell, compact_bin, is_s3 in configs:
+        for label, shell, compact_bin, is_s3, ps_kb in configs:
             run_label = f"{ds_name}_{label}"
+            insert_sql_text = read_sql(insert_sql)
+            schema_lines, insert_lines = split_schema_inserts(insert_sql_text)
+            schema_sql = build_schema_sql(schema_lines, ps_kb)
+            insert_sql_prepared = os.path.join(args.db_dir, f".schema_{run_label}.sql")
+            with open(insert_sql_prepared, "w") as f:
+                f.write(schema_sql + "\n" + "\n".join(insert_lines) + "\n")
             result = run_one_config(
-                run_label, shell, compact_bin, insert_sql, query_sql,
+                run_label, shell, compact_bin, insert_sql_prepared, query_sql,
                 gt_results, args.k, args.db_dir, is_sqlite3=is_s3,
                 auto_compact=auto_compact, do_drop_cache=args.drop_cache,
                 internal_io_timing=bool(args.internal_io_timing),
@@ -668,6 +679,8 @@ def main():
             # Clean up DB after results are recorded to free disk space
             db_path = os.path.join(args.db_dir, f"bench_{run_label}.db")
             cleanup_db(db_path, is_sqlite3=is_s3)
+            if os.path.exists(insert_sql_prepared):
+                os.remove(insert_sql_prepared)
             print(f"  Cleaned up {db_path}")
 
         all_results[ds_name] = ds_results

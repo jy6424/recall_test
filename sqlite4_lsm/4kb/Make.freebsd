@@ -1,4 +1,0 @@
-# FreeBSD build configuration
-
-include Make.unix
-
