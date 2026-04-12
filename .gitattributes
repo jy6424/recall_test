@@ -1,2 +1,0 @@
-dataset/insert100k_*.sql filter=lfs diff=lfs merge=lfs -text
-dataset/*.sql filter=lfs diff=lfs merge=lfs -text

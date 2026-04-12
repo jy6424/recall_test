@@ -253,9 +253,9 @@ def drop_caches(enabled=True):
     if not enabled:
         return
     try:
-        subprocess.run(["sudo", "-n", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"],
+        subprocess.run(["sudo", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"],
                        check=True, timeout=10)
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError) as e:
         print(f"  WARNING: drop_caches failed: {e}")
 
 
@@ -640,7 +640,7 @@ def main():
 
     auto_compact = bool(args.auto_compact)
     print(f"Datasets:     {', '.join(n for n, _, _, _ in datasets)}")
-    print(f"Configs:      {', '.join(l for l, _, _, _ in configs)}")
+    print(f"Configs:      {', '.join(cfg[0] for cfg in configs)}")
     print(f"Auto-compact: {'ON (no compact_db)' if auto_compact else 'OFF (use compact_db)'}")
     print(f"Internal I/O timing: {'ON' if args.internal_io_timing else 'OFF'}")
     print(f"Disk device:  /dev/{DISK_DEVICE}")
