@@ -423,11 +423,13 @@ typedef struct PragmaCtx PragmaCtx;
 struct PragmaCtx {
   lsm_db *pDb;
   int ePragma;
+  int eConfig;
 };
 
 #define KVLSM_LSM_FLUSH      1
 #define KVLSM_LSM_WORK       2
 #define KVLSM_LSM_CHECKPOINT 3
+#define KVLSM_LSM_CONFIG     4
 
 static void kvlsmPragmaDestroy(void *p){
   sqlite4_free(0, p);
@@ -461,6 +463,17 @@ static void kvlsmPragma(sqlite4_context *ctx, int nArg, sqlite4_value **apArg){
       sqlite4_result_int(ctx, nKB);
       break;
     }
+
+    case KVLSM_LSM_CONFIG: {
+      int iVal = 0;
+      if( nArg>1 ) goto wrong_num_args;
+      if( nArg==1 ){
+        iVal = sqlite4_value_int(apArg[0]);
+      }
+      rc = lsm_config(p->pDb, p->eConfig, &iVal);
+      sqlite4_result_int(ctx, iVal);
+      break;
+    }
   }
 
   if( rc!=SQLITE4_OK ){
@@ -482,6 +495,25 @@ static int kvlsmGetMethod(
   KVLsm *pLsm = (KVLsm *)pKVStore;
   PragmaCtx *p;
   int ePragma = 0;
+  int eConfig = 0;
+  struct ConfigPragma {
+    const char *zName;
+    int eConfig;
+  } aConfigPragma[] = {
+    { "lsm_autoflush",          LSM_CONFIG_AUTOFLUSH },
+    { "lsm_page_size",          LSM_CONFIG_PAGE_SIZE },
+    { "lsm_safety",             LSM_CONFIG_SAFETY },
+    { "lsm_block_size",         LSM_CONFIG_BLOCK_SIZE },
+    { "lsm_autowork",           LSM_CONFIG_AUTOWORK },
+    { "lsm_mmap",               LSM_CONFIG_MMAP },
+    { "lsm_use_log",            LSM_CONFIG_USE_LOG },
+    { "lsm_automerge",          LSM_CONFIG_AUTOMERGE },
+    { "lsm_max_freelist",       LSM_CONFIG_MAX_FREELIST },
+    { "lsm_multiple_processes", LSM_CONFIG_MULTIPLE_PROCESSES },
+    { "lsm_autocheckpoint",     LSM_CONFIG_AUTOCHECKPOINT },
+    { "lsm_readonly",           LSM_CONFIG_READONLY }
+  };
+  int i;
 
   if( 0==sqlite4_strnicmp(zMethod, "lsm_flush", 9) ){
     ePragma = KVLSM_LSM_FLUSH;
@@ -492,12 +524,20 @@ static int kvlsmGetMethod(
   else if( 0==sqlite4_strnicmp(zMethod, "lsm_checkpoint", 14) ){
     ePragma = KVLSM_LSM_CHECKPOINT;
   }else{
-    return SQLITE4_NOTFOUND;
+    for(i=0; i<ArraySize(aConfigPragma); i++){
+      if( 0==sqlite4_strnicmp(zMethod, aConfigPragma[i].zName, -1) ){
+        ePragma = KVLSM_LSM_CONFIG;
+        eConfig = aConfigPragma[i].eConfig;
+        break;
+      }
+    }
+    if( ePragma==0 ) return SQLITE4_NOTFOUND;
   }
 
   p = sqlite4_malloc(0, sizeof(PragmaCtx));
   if( p==0 ) return SQLITE4_NOMEM;
   p->ePragma = ePragma;
+  p->eConfig = eConfig;
   p->pDb = pLsm->pDb;
 
   *ppArg = (void *)p;
