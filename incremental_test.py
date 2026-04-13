@@ -677,7 +677,7 @@ def main():
                         help="Directory containing sqlite3")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
-    parser.add_argument("--auto-compact", type=int, default=0, choices=[0, 1],
+    parser.add_argument("--auto-compact", type=int, default=1, choices=[0, 1],
                         help="0: use compact_db after each batch (autowork=0), "
                              "1: skip compact_db (autowork=1 handles it)")
     parser.add_argument("--drop-cache", action="store_true",
