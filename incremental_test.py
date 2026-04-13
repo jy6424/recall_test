@@ -7,6 +7,7 @@ import threading
 from datetime import datetime
 import numpy as np
 
+TIME_MARKER = "__TIME__"
 DISK_DEVICE = "mmcblk0p1"
 
 
@@ -174,7 +175,7 @@ class DiskStatsMonitor:
 
 def format_io_summary(io_stats):
     if not io_stats.get("available"):
-        return f"disk={io_stats['device']} unavailable ({io_stats.get('error', 'unknown')})"
+        return f"disk={io_stats.get('device', DISK_DEVICE)} unavailable ({io_stats.get('error', 'unknown error')})"
     return (
         f"disk={io_stats['device']} "
         f"RBW={io_stats['avg_read_mbps']:.1f}MB/s "
@@ -186,19 +187,97 @@ def format_io_summary(io_stats):
     )
 
 
-def run_shell(shell, db, sql_input, pass_stderr=False):
-    """Run SQL through shell in one session."""
+def parse_time_stats(stderr_text):
+    stats = {}
+    kept = []
+    for line in stderr_text.splitlines():
+        if line.startswith(TIME_MARKER):
+            m = re.search(r"real=([\d.]+)\s+user=([\d.]+)\s+sys=([\d.]+)", line)
+            if m:
+                stats["real_s"] = float(m.group(1))
+                stats["user_s"] = float(m.group(2))
+                stats["sys_s"] = float(m.group(3))
+        else:
+            kept.append(line)
+    cleaned = "\n".join(kept)
+    if stderr_text.endswith("\n"):
+        cleaned += "\n"
+    return cleaned, stats
+
+
+def parse_diskann_stats(stderr_text):
+    stats = {}
+
+    def grab(pattern, key, conv=float):
+        m = re.search(pattern, stderr_text)
+        if m:
+            stats[key] = conv(m.group(1))
+
+    grab(r'table insert:\s*([\d.]+)\s+ms', 'table_insert_ms')
+    grab(r'index build:\s*([\d.]+)\s+ms', 'build_total_ms')
+    grab(r'build read I/O:\s*([\d.]+)\s+ms', 'build_read_ms')
+    grab(r'build write I/O:\s*([\d.]+)\s+ms', 'build_write_ms')
+    grab(r'build distance:\s*([\d.]+)\s+ms', 'build_dist_ms')
+    grab(r'LSM work during build:\s*([\d.]+)\s+ms', 'build_lsm_ms')
+    grab(r'graph traversal:\s*([\d.]+)\s+ms', 'graph_ms')
+    grab(r'query read I/O:\s*([\d.]+)\s+ms', 'query_read_ms')
+    grab(r'query distance:\s*([\d.]+)\s+ms', 'query_dist_ms')
+    grab(r'result collect:\s*([\d.]+)\s+ms', 'result_ms')
+    grab(r'([\d.]+)\s+q/s', 'qps')
+    return stats
+
+
+def extract_c_stat_blocks(stderr_text):
+    lines = stderr_text.splitlines()
+    blocks = []
+    cur = []
+    in_block = False
+
+    for line in lines:
+        stripped = line.rstrip()
+        if stripped.startswith("=== diskAnn ") and stripped.endswith("==="):
+            if cur:
+                blocks.append("\n".join(cur))
+                cur = []
+            in_block = True
+            cur.append(stripped)
+            continue
+
+        if in_block:
+            cur.append(stripped)
+            if stripped == "================================================":
+                blocks.append("\n".join(cur))
+                cur = []
+                in_block = False
+
+    if cur:
+        blocks.append("\n".join(cur))
+
+    return blocks
+
+
+def run_shell(shell, db, sql_input, env=None):
+    """Run SQL through shell in one session. Returns (stdout, stderr, time_stats)."""
+    if not sql_input.rstrip().endswith(".quit"):
+        sql_input = sql_input + "\n.quit\n"
+    cmd = [shell, db]
+    if os.path.exists("/usr/bin/time"):
+        cmd = ["/usr/bin/time", "-f", f"{TIME_MARKER} real=%e user=%U sys=%S"] + cmd
     proc = subprocess.run(
-        [shell, db],
+        cmd,
         input=sql_input,
         stdout=subprocess.PIPE,
-        stderr=None if pass_stderr else subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
+        timeout=20000,
+        env=env,
     )
-    if proc.returncode != 0:
-        err = "" if pass_stderr else proc.stderr[:500]
-        raise RuntimeError(f"shell error (rc={proc.returncode}): {err}")
-    return proc.stdout
+    stderr_text, time_stats = parse_time_stats(proc.stderr)
+    if proc.returncode != 0 and proc.returncode != 1:
+        err_lines = [l for l in stderr_text.splitlines() if not l.startswith("[LSM]")]
+        err_msg = "\n".join(err_lines[-10:]) if err_lines else stderr_text[-500:]
+        raise RuntimeError(f"shell error (rc={proc.returncode}): {err_msg}")
+    return proc.stdout, stderr_text, time_stats
 
 
 def drop_caches(enabled=True):
@@ -212,13 +291,19 @@ def drop_caches(enabled=True):
         print(f"  WARNING: drop_caches failed: {e}")
 
 
-def run_compact(compact_bin, db):
+def run_compact(compact_bin, db, env=None):
+    cmd = [compact_bin, db]
+    if os.path.exists("/usr/bin/time"):
+        cmd = ["/usr/bin/time", "-f", f"{TIME_MARKER} real=%e user=%U sys=%S"] + cmd
     proc = subprocess.run(
-        [compact_bin, db],
+        cmd,
         capture_output=True,
         text=True,
+        timeout=20000,
+        env=env,
     )
-    return proc.stderr
+    stderr_text, time_stats = parse_time_stats(proc.stderr)
+    return stderr_text, time_stats
 
 
 def file_size_mb(path):
@@ -378,6 +463,8 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
     db_path = os.path.join(db_dir, f"incr_{label}.db")
     db_target = build_db_target(db_path, is_sqlite3=is_sqlite3, page_size_kb=page_size_kb)
     cleanup_db(db_path, is_sqlite3)
+    child_env = os.environ.copy()
+    child_env["DISKANN_IO_TIMING"] = "1"
 
     # Parse files
     schema, inserts = parse_insert_sql(insert_sql_path)
@@ -408,7 +495,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
         schema_sql = build_schema_sql(schema, page_size_kb)
     else:
         schema_sql = "\n".join(schema)
-    run_shell(shell, db_target, schema_sql)
+    run_shell(shell, db_target, schema_sql, env=child_env)
     print(f"  Schema created")
 
     # Build ANN query string
@@ -433,11 +520,41 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             insert_log = os.path.join(io_log_dir, f"{label}_batch{batch_idx+1}_insert_io.csv")
         insert_mon = DiskStatsMonitor(disk_device, log_path=insert_log).start()
         t0 = time.time()
-        run_shell(shell, db_target, batch_sql)
+        _, ins_err, ins_time_stats = run_shell(shell, db_target, batch_sql, env=child_env)
         t_insert = time.time() - t0
         insert_io = insert_mon.stop()
+        ins_err_lines = [l for l in ins_err.splitlines() if l.startswith("Error:")]
+        if ins_err_lines:
+            print(f"        !! {len(ins_err_lines)} SQL errors during insert:")
+            for l in ins_err_lines[:5]:
+                print(f"           {l}")
+            if len(ins_err_lines) > 5:
+                print(f"           ... ({len(ins_err_lines)-5} more)")
+            raise RuntimeError(f"insert phase had {len(ins_err_lines)} SQL errors")
+        ins_stats = parse_diskann_stats(ins_err)
         print(f"  Insert:  {t_insert:.1f}s ({batch_size} rows)")
+        if ins_time_stats:
+            print(
+                f"          time: real={ins_time_stats.get('real_s', 0):.2f}s  "
+                f"user={ins_time_stats.get('user_s', 0):.2f}s  "
+                f"sys={ins_time_stats.get('sys_s', 0):.2f}s"
+            )
+        if ins_stats.get('build_total_ms') is not None:
+            table_s = ins_stats.get('table_insert_ms', 0) / 1000
+            build_s = ins_stats.get('build_total_ms', 0) / 1000
+            read_s = ins_stats.get('build_read_ms', 0) / 1000
+            write_s = ins_stats.get('build_write_ms', 0) / 1000
+            dist_s = ins_stats.get('build_dist_ms', 0) / 1000
+            lsm_s = ins_stats.get('build_lsm_ms', 0) / 1000
+            print(
+                f"          TableIns={table_s:.1f}s  "
+                f"IndexBuild={build_s:.1f}s  BuildRead={read_s:.1f}s  "
+                f"BuildWrite={write_s:.1f}s  BuildDist={dist_s:.1f}s  "
+                f"LSMWork={lsm_s:.1f}s"
+            )
         print(f"          {format_io_summary(insert_io)}")
+        for block in extract_c_stat_blocks(ins_err):
+            print(block)
 
         # Compact (sqlite4 only, if enabled)
         t_compact = 0.0
@@ -449,11 +566,20 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
                 compact_log = os.path.join(io_log_dir, f"{label}_batch{batch_idx+1}_compact_io.csv")
             compact_mon = DiskStatsMonitor(disk_device, log_path=compact_log).start()
             t0 = time.time()
-            run_compact(compact_bin, db_path)
+            compact_out, compact_time_stats = run_compact(compact_bin, db_path, env=child_env)
             t_compact = time.time() - t0
             compact_io = compact_mon.stop()
             print(f"  Compact: {t_compact:.1f}s")
+            if compact_time_stats:
+                print(
+                    f"          time: real={compact_time_stats.get('real_s', 0):.2f}s  "
+                    f"user={compact_time_stats.get('user_s', 0):.2f}s  "
+                    f"sys={compact_time_stats.get('sys_s', 0):.2f}s"
+                )
             print(f"          {format_io_summary(compact_io)}")
+            for line in compact_out.split("\n"):
+                if line.startswith("Final:"):
+                    print(f"          {line.strip()}")
 
         db_size = file_size_mb(db_path)
 
@@ -464,13 +590,36 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             query_log = os.path.join(io_log_dir, f"{label}_batch{batch_idx+1}_query_io.csv")
         query_mon = DiskStatsMonitor(disk_device, log_path=query_log).start()
         t0 = time.time()
-        ann_out = run_shell(shell, db_target, ann_sql, pass_stderr=True)
+        ann_out, q_err, q_time_stats = run_shell(shell, db_target, ann_sql, env=child_env)
         t_ann = time.time() - t0
         query_io = query_mon.stop()
+        q_err_lines = [l for l in q_err.splitlines() if l.startswith("Error:")]
+        if q_err_lines:
+            print(f"        !! {len(q_err_lines)} SQL errors during query:")
+            for l in q_err_lines[:5]:
+                print(f"           {l}")
+            if len(q_err_lines) > 5:
+                print(f"           ... ({len(q_err_lines)-5} more)")
         ann_results = parse_output_to_results(ann_out, k)
         ann_qps = n_queries / t_ann if t_ann > 0 else 0
+        q_stats = parse_diskann_stats(q_err)
         print(f"  ANN:     {t_ann:.2f}s ({ann_qps:.0f} q/s)")
+        if q_time_stats:
+            print(
+                f"          time: real={q_time_stats.get('real_s', 0):.2f}s  "
+                f"user={q_time_stats.get('user_s', 0):.2f}s  "
+                f"sys={q_time_stats.get('sys_s', 0):.2f}s"
+            )
+        if q_stats.get('graph_ms') is not None:
+            print(
+                f"          Graph={q_stats.get('graph_ms', 0):.0f}ms  "
+                f"QueryRead={q_stats.get('query_read_ms', 0):.0f}ms  "
+                f"QueryDist={q_stats.get('query_dist_ms', 0):.0f}ms  "
+                f"Result={q_stats.get('result_ms', 0):.0f}ms"
+            )
         print(f"          {format_io_summary(query_io)}")
+        for block in extract_c_stat_blocks(q_err):
+            print(block)
 
         # Compute groundtruth with numpy
         t0 = time.time()
@@ -503,6 +652,11 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             "insert_disk_io": insert_io,
             "compact_disk_io": compact_io,
             "query_disk_io": query_io,
+            "insert_time_stats": ins_time_stats,
+            "insert_stats": ins_stats,
+            "compact_time_stats": compact_time_stats if need_compact else {},
+            "query_time_stats": q_time_stats,
+            "query_stats": q_stats,
         })
 
     return results
