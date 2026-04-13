@@ -255,6 +255,17 @@ def parse_insert_sql(sql_path):
     return schema, inserts
 
 
+def build_schema_sql(schema_lines, page_size_kb):
+    pragma = f"PRAGMA page_size={page_size_kb * 1024};"
+    return "\n".join([pragma] + schema_lines)
+
+
+def build_db_target(db_path, is_sqlite3=False, page_size_kb=None):
+    if is_sqlite3 or page_size_kb is None:
+        return db_path
+    return f"file:{db_path}?page_size={page_size_kb * 1024}"
+
+
 def parse_query_sql(sql_path):
     """Extract ANN query lines and query vectors from query SQL.
     Returns (ann_queries: list[str], query_vecs: np.ndarray)."""
@@ -360,10 +371,12 @@ def compute_recall(ann_results, bf_results, k):
 def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
                     all_ids, all_vecs, query_vecs, k, db_dir,
                     distance_type="cosine", is_sqlite3=False, do_compact=False,
-                    do_drop_cache=False, io_log_dir=None, disk_device=DISK_DEVICE):
+                    do_drop_cache=False, io_log_dir=None, disk_device=DISK_DEVICE,
+                    page_size_kb=None):
     """Run incremental insert experiment for one config."""
 
     db_path = os.path.join(db_dir, f"incr_{label}.db")
+    db_target = build_db_target(db_path, is_sqlite3=is_sqlite3, page_size_kb=page_size_kb)
     cleanup_db(db_path, is_sqlite3)
 
     # Parse files
@@ -377,6 +390,8 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
     print(f"\n{'='*70}")
     print(f"  Config: {label}")
     print(f"  Shell:   {shell}")
+    if not is_sqlite3 and page_size_kb is not None:
+        print(f"  DB open: {db_target}")
     if need_compact:
         print(f"  Compact: {compact_bin}")
     print(f"  Total inserts: {n_total}, Queries: {n_queries}, k={k}")
@@ -389,8 +404,11 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
     batches = [n_first] + [n_batch] * 4 + [n_remaining - n_batch * 4]
 
     # Create schema (not timed)
-    schema_sql = "\n".join(schema)
-    run_shell(shell, db_path, schema_sql)
+    if not is_sqlite3 and page_size_kb is not None:
+        schema_sql = build_schema_sql(schema, page_size_kb)
+    else:
+        schema_sql = "\n".join(schema)
+    run_shell(shell, db_target, schema_sql)
     print(f"  Schema created")
 
     # Build ANN query string
@@ -415,7 +433,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             insert_log = os.path.join(io_log_dir, f"{label}_batch{batch_idx+1}_insert_io.csv")
         insert_mon = DiskStatsMonitor(disk_device, log_path=insert_log).start()
         t0 = time.time()
-        run_shell(shell, db_path, batch_sql)
+        run_shell(shell, db_target, batch_sql)
         t_insert = time.time() - t0
         insert_io = insert_mon.stop()
         print(f"  Insert:  {t_insert:.1f}s ({batch_size} rows)")
@@ -446,7 +464,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             query_log = os.path.join(io_log_dir, f"{label}_batch{batch_idx+1}_query_io.csv")
         query_mon = DiskStatsMonitor(disk_device, log_path=query_log).start()
         t0 = time.time()
-        ann_out = run_shell(shell, db_path, ann_sql, pass_stderr=True)
+        ann_out = run_shell(shell, db_target, ann_sql, pass_stderr=True)
         t_ann = time.time() - t0
         query_io = query_mon.stop()
         ann_results = parse_output_to_results(ann_out, k)
@@ -500,9 +518,9 @@ def main():
                         help="Comma-separated dataset names (default: glove,sift,coco,cohere)")
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--sqlite4-dir", type=str, default="./sqlite4_lsm",
-                        help="Directory containing 4kb/, 16kb/, ... with sqlite4 + compact_db")
+                        help="Directory containing sqlite4 and optional compact_db")
     parser.add_argument("--sqlite3-dir", type=str, default="./sqlite3_libsql",
-                        help="Directory containing 4kb/, 16kb/, ... with sqlite3")
+                        help="Directory containing sqlite3")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
     parser.add_argument("--auto-compact", type=int, default=0, choices=[0, 1],
@@ -534,33 +552,33 @@ def main():
         print("Error: no valid datasets found.")
         return 1
 
-    # Build configs: (label, shell, compact_bin_or_None, is_sqlite3)
+    # Build configs: (label, shell, compact_bin_or_None, is_sqlite3, page_size_kb)
     configs = []
 
     if args.sqlite4_dir:
-        for ps_kb in page_sizes_kb:
-            shell = os.path.join(args.sqlite4_dir, f"{ps_kb}kb", "sqlite4")
-            compact = os.path.join(args.sqlite4_dir, f"{ps_kb}kb", "compact_db")
-            if not os.path.isfile(shell):
-                print(f"Warning: {ps_kb}kb sqlite4 missing, skipping")
-                continue
+        shell = os.path.join(args.sqlite4_dir, "sqlite4")
+        compact = os.path.join(args.sqlite4_dir, "compact_db")
+        if not os.path.isfile(shell):
+            print("Warning: sqlite4 binary missing, skipping sqlite4 configs")
+        else:
             compact_bin = compact if os.path.isfile(compact) else None
-            configs.append((f"lsm_{ps_kb}kb", shell, compact_bin, False))
+            for ps_kb in page_sizes_kb:
+                configs.append((f"lsm_{ps_kb}kb", shell, compact_bin, False, ps_kb))
 
     if args.sqlite3_dir:
-        for ps_kb in page_sizes_kb:
-            shell = os.path.join(args.sqlite3_dir, f"{ps_kb}kb", "sqlite3")
-            if os.path.isfile(shell):
-                configs.append((f"sqlite3_{ps_kb}kb", shell, None, True))
-            else:
-                print(f"Warning: {ps_kb}kb sqlite3 missing, skipping")
+        shell = os.path.join(args.sqlite3_dir, "sqlite3")
+        if not os.path.isfile(shell):
+            print("Warning: sqlite3 binary missing, skipping sqlite3 configs")
+        else:
+            for ps_kb in page_sizes_kb:
+                configs.append((f"sqlite3_{ps_kb}kb", shell, None, True, ps_kb))
 
     if not configs:
         print("Error: no valid configurations found.")
         return 1
 
     print(f"Datasets: {', '.join(n for n, _, _ in datasets)}")
-    print(f"Configs:  {', '.join(l for l, _, _, _ in configs)}")
+    print(f"Configs:  {', '.join(l for l, _, _, _, _ in configs)}")
     auto_compact = bool(args.auto_compact)
     print(f"Auto-compact: {'ON (no compact_db)' if auto_compact else 'OFF (use compact_db)'}")
     print(f"Disk device: {args.disk_device}")
@@ -588,7 +606,7 @@ def main():
         _, query_vecs = parse_query_sql(query_sql)
         print(f"  Parsed {len(query_vecs)} query vectors")
 
-        for label, shell, compact_bin, is_s3 in configs:
+        for label, shell, compact_bin, is_s3, ps_kb in configs:
             run_label = f"{ds_name}_{label}"
             results = run_incremental(
                 run_label, shell, compact_bin, insert_sql, query_sql,
@@ -596,7 +614,7 @@ def main():
                 args.k, args.db_dir, distance_type=dist_type,
                 is_sqlite3=is_s3, do_compact=not auto_compact,
                 do_drop_cache=args.drop_cache, io_log_dir=args.io_log_dir,
-                disk_device=args.disk_device
+                disk_device=args.disk_device, page_size_kb=ps_kb
             )
             all_results[run_label] = results
 
