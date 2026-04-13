@@ -286,6 +286,13 @@ def build_schema_sql(schema_lines, page_size_kb):
     return "\n".join([pragma] + schema_lines)
 
 
+def build_db_target(db_path, is_sqlite3=False, page_size_kb=None):
+    """Return the shell target used to open the database."""
+    if is_sqlite3 or page_size_kb is None:
+        return db_path
+    return f"file:{db_path}?page_size={page_size_kb * 1024}"
+
+
 def parse_output_to_results(output, k):
     """Parse shell output into list of sets of IDs, chunked by k."""
     id_lines = []
@@ -403,8 +410,10 @@ def format_io_summary(io_stats):
 
 def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                    gt_results, k, db_dir, is_sqlite3=False, auto_compact=False,
-                   do_drop_cache=False, internal_io_timing=False, io_log_dir=None):
+                   do_drop_cache=False, internal_io_timing=False, io_log_dir=None,
+                   page_size_kb=None):
     db_path = os.path.join(db_dir, f"bench_{label}.db")
+    db_target = build_db_target(db_path, is_sqlite3=is_sqlite3, page_size_kb=page_size_kb)
     cleanup_db(db_path, is_sqlite3)
     child_env = os.environ.copy()
     child_env["DISKANN_IO_TIMING"] = "1" if internal_io_timing else "0"
@@ -416,6 +425,8 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     print(f"\n{'='*60}")
     print(f"  Config: {label}")
     print(f"  Shell:   {shell}")
+    if not is_sqlite3 and page_size_kb is not None:
+        print(f"  DB open: {db_target}")
     if need_compact:
         print(f"  Compact: {compact_bin}")
     print(f"{'='*60}")
@@ -425,14 +436,14 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     schema_lines, insert_lines = split_schema_inserts(insert_sql)
 
     print(f"  [1/{n_phases}] Schema + Insert...")
-    run_shell(shell, db_path, "\n".join(schema_lines), env=child_env)  # ignore return tuple
+    run_shell(shell, db_target, "\n".join(schema_lines), env=child_env)  # ignore return tuple
 
     # Insert (timed — equivalent to ann-benchmarks fit())
     drop_caches(do_drop_cache)
     insert_log = os.path.join(io_log_dir, f"{label}_insert_io.csv") if io_log_dir else None
     insert_mon = DiskStatsMonitor(DISK_DEVICE, log_path=insert_log).start()
     t0 = time.time()
-    ins_out, ins_err, ins_time = run_shell(shell, db_path, "\n".join(insert_lines), env=child_env)
+    ins_out, ins_err, ins_time = run_shell(shell, db_target, "\n".join(insert_lines), env=child_env)
     t_insert = time.time() - t0
     result["insert_disk_io"] = insert_mon.stop()
 
@@ -511,7 +522,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     query_log = os.path.join(io_log_dir, f"{label}_query_io.csv") if io_log_dir else None
     query_mon = DiskStatsMonitor(DISK_DEVICE, log_path=query_log).start()
     t0 = time.time()
-    ann_out, q_err, q_time_stats = run_shell(shell, db_path, query_sql, env=child_env)
+    ann_out, q_err, q_time_stats = run_shell(shell, db_target, query_sql, env=child_env)
     t_query = time.time() - t0
     result["query_disk_io"] = query_mon.stop()
 
@@ -672,7 +683,7 @@ def main():
                 gt_results, args.k, args.db_dir, is_sqlite3=is_s3,
                 auto_compact=auto_compact, do_drop_cache=args.drop_cache,
                 internal_io_timing=bool(args.internal_io_timing),
-                io_log_dir=args.io_log_dir
+                io_log_dir=args.io_log_dir, page_size_kb=ps_kb
             )
             ds_results.append(result)
 
