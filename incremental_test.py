@@ -21,6 +21,17 @@ def run_shell(shell, db, sql_input, pass_stderr=False):
     return proc.stdout
 
 
+def drop_caches(enabled=True):
+    """Drop OS page cache. Requires sudo."""
+    if not enabled:
+        return
+    try:
+        subprocess.run(["sudo", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"],
+                       check=True, timeout=10)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError) as e:
+        print(f"  WARNING: drop_caches failed: {e}")
+
+
 def run_compact(compact_bin, db):
     proc = subprocess.run(
         [compact_bin, db],
@@ -168,7 +179,8 @@ def compute_recall(ann_results, bf_results, k):
 
 def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
                     all_ids, all_vecs, query_vecs, k, db_dir,
-                    distance_type="cosine", is_sqlite3=False, do_compact=False):
+                    distance_type="cosine", is_sqlite3=False, do_compact=False,
+                    do_drop_cache=False):
     """Run incremental insert experiment for one config."""
 
     db_path = os.path.join(db_dir, f"incr_{label}.db")
@@ -217,6 +229,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
 
         # Insert batch (timed)
         batch_sql = "\n".join(batch_inserts)
+        drop_caches(do_drop_cache)
         t0 = time.time()
         run_shell(shell, db_path, batch_sql)
         t_insert = time.time() - t0
@@ -225,6 +238,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
         # Compact (sqlite4 only, if enabled)
         t_compact = 0.0
         if need_compact:
+            drop_caches()
             t0 = time.time()
             run_compact(compact_bin, db_path)
             t_compact = time.time() - t0
@@ -233,6 +247,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
         db_size = file_size_mb(db_path)
 
         # ANN query (timed)
+        drop_caches(do_drop_cache)
         t0 = time.time()
         ann_out = run_shell(shell, db_path, ann_sql, pass_stderr=True)
         t_ann = time.time() - t0
@@ -291,6 +306,8 @@ def main():
     parser.add_argument("--auto-compact", type=int, default=0, choices=[0, 1],
                         help="0: use compact_db after each batch (autowork=0), "
                              "1: skip compact_db (autowork=1 handles it)")
+    parser.add_argument("--drop-cache", action="store_true",
+                        help="Drop OS page cache before each timed phase (requires sudo)")
     args = parser.parse_args()
 
     page_sizes_kb = [int(x) for x in args.page_sizes.split(",")]
@@ -369,7 +386,8 @@ def main():
                 run_label, shell, compact_bin, insert_sql, query_sql,
                 all_ids, all_vecs, query_vecs,
                 args.k, args.db_dir, distance_type=dist_type,
-                is_sqlite3=is_s3, do_compact=not auto_compact
+                is_sqlite3=is_s3, do_compact=not auto_compact,
+                do_drop_cache=args.drop_cache
             )
             all_results[run_label] = results
 

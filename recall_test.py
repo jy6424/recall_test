@@ -599,7 +599,7 @@ def main():
                              "1: skip compact_db (autowork=1 handles it)")
     parser.add_argument("--drop-cache", action="store_true",
                         help="Drop OS page cache before each timed phase (requires sudo)")
-    parser.add_argument("--internal-io-timing", type=int, default=0, choices=[0, 1],
+    parser.add_argument("--internal-io-timing", type=int, default=1, choices=[0, 1],
                         help="0: disable per-op internal read/write I/O timing, 1: enable it")
     parser.add_argument("--io-log-dir", type=str, default="./io_logs",
                         help="Directory to store per-run disk I/O CSV logs")
