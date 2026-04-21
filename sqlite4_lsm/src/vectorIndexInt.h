@@ -36,7 +36,6 @@ struct DiskAnnIndex {
   int iShadowTnum;     /* tnum (root) of the shadow table in KV store */
   int nKeyPrefix;      /* length of the varint-encoded tnum prefix */
   u8 aKeyPrefix[9];    /* varint-encoded tnum prefix (max 9 bytes for varint64) */
-  KVCursor *pReadCsr;  /* persistent read cursor (reused across blobSpotReload calls) */
 
   int nReads;
   int nWrites;

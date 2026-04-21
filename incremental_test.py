@@ -420,6 +420,8 @@ def compute_groundtruth_l2(data_vecs, query_vecs, k):
 DISTANCE_TYPES = {
     "glove": "cosine",
     "sift": "l2",
+    "coco" : "cosine",
+    "cohere": "cosine",
 }
 
 
