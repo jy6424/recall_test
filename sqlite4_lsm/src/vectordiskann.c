@@ -370,32 +370,30 @@ int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot,
     int doTiming = diskAnnIoTimingEnabled();
     if( doTiming ) clock_gettime(CLOCK_MONOTONIC, &_kvr0);
 
-    KVCursor *pCsr = NULL;
-    rc = sqlite4KVStoreOpenCursor(pIndex->db->aDb[0].pKV, &pCsr);
-    if( rc != SQLITE4_OK ) goto abort;
+    /* Lazily open persistent read cursor on first use */
+    if( pIndex->pReadCsr == NULL ){
+      rc = sqlite4KVStoreOpenCursor(pIndex->db->aDb[0].pKV, &pIndex->pReadCsr);
+      if( rc != SQLITE4_OK ) goto abort;
+    }
 
-    rc = sqlite4KVCursorSeek(pCsr, aKey, nKey, 0);
+    rc = sqlite4KVCursorSeek(pIndex->pReadCsr, aKey, nKey, 0);
     if( rc == SQLITE4_NOTFOUND || rc == SQLITE4_INEXACT ){
-      sqlite4KVCursorClose(pCsr);
       return DISKANN_ROW_NOT_FOUND;
     }
-    if( rc != SQLITE4_OK ){ sqlite4KVCursorClose(pCsr); goto abort; }
+    if( rc != SQLITE4_OK ) goto abort;
 
-    rc = sqlite4KVCursorData(pCsr, 0, -1, &pData, &nData);
-    if( rc != SQLITE4_OK ){ sqlite4KVCursorClose(pCsr); goto abort; }
+    rc = sqlite4KVCursorData(pIndex->pReadCsr, 0, -1, &pData, &nData);
+    if( rc != SQLITE4_OK ) goto abort;
 
     {
       int nBlob = 0;
       const u8 *pBlob = blobSpotDecodeRecord((const u8*)pData, (int)nData, &nBlob);
       if( pBlob == NULL || nBlob < nBufferSize ){
-        sqlite4KVCursorClose(pCsr);
         rc = SQLITE4_ERROR;
         goto abort;
       }
       memcpy(pBlobSpot->pBuffer, pBlob, nBufferSize);
     }
-
-    sqlite4KVCursorClose(pCsr);
 
     if( doTiming ){
       clock_gettime(CLOCK_MONOTONIC, &_kvr1);
@@ -2127,6 +2125,9 @@ void diskAnnCloseIndex(DiskAnnIndex *pIndex){
   }
   if( pIndex->zShadow ){
     sqlite4DbFree(pIndex->db, pIndex->zShadow);
+  }
+  if( pIndex->pReadCsr ){
+    sqlite4KVCursorClose(pIndex->pReadCsr);
   }
   sqlite4DbFree(pIndex->db, pIndex);
 }
