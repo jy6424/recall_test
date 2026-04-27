@@ -325,19 +325,27 @@ def cleanup_db(db_path, is_sqlite3=False):
 
 
 def parse_insert_sql(sql_path):
-    """Split insert SQL into schema lines and INSERT statements."""
+    """Split insert SQL into (schema, index_lines, inserts).
+    schema      = CREATE TABLE / PRAGMA (run before any data)
+    index_lines = CREATE INDEX (deferred until after the first batch)
+    inserts     = INSERT INTO statements
+    """
     schema = []
+    index_lines = []
     inserts = []
     with open(sql_path) as f:
         for line in f:
             stripped = line.strip()
             if not stripped:
                 continue
-            if stripped.upper().startswith("INSERT"):
+            upper = stripped.upper()
+            if upper.startswith("INSERT"):
                 inserts.append(stripped)
+            elif upper.startswith("CREATE INDEX") or upper.startswith("CREATE UNIQUE INDEX"):
+                index_lines.append(stripped)
             else:
                 schema.append(stripped)
-    return schema, inserts
+    return schema, index_lines, inserts
 
 
 def build_schema_sql(schema_lines, page_size_kb):
@@ -469,7 +477,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
     child_env["DISKANN_IO_TIMING"] = "1"
 
     # Parse files
-    schema, inserts = parse_insert_sql(insert_sql_path)
+    schema, index_lines, inserts = parse_insert_sql(insert_sql_path)
     ann_queries, _ = parse_query_sql(query_sql_path)
     n_total = len(inserts)
     n_queries = len(ann_queries)
@@ -557,6 +565,57 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
         print(f"          {format_io_summary(insert_io)}")
         for block in extract_c_stat_blocks(ins_err):
             print(block)
+
+        # Build index after the first batch — graph is constructed once over
+        # the 50% baseline rows. Subsequent batches insert into an existing
+        # index, so each row triggers diskAnnInsert as usual.
+        t_build = 0.0
+        build_io = None
+        build_time_stats = {}
+        build_stats = {}
+        if batch_idx == 0 and index_lines:
+            print(f"  --- Creating index over {inserted_so_far} baseline rows ---")
+            drop_caches(do_drop_cache)
+            build_log = None
+            if io_log_dir:
+                build_log = os.path.join(io_log_dir, f"{label}_batch{batch_idx+1}_build_io.csv")
+            build_mon = DiskStatsMonitor(disk_device, log_path=build_log).start()
+            t0 = time.time()
+            _, build_err, build_time_stats = run_shell(
+                shell, db_target, "\n".join(index_lines), env=child_env
+            )
+            t_build = time.time() - t0
+            build_io = build_mon.stop()
+            build_err_lines = [l for l in build_err.splitlines() if l.startswith("Error:")]
+            if build_err_lines:
+                print(f"        !! {len(build_err_lines)} SQL errors during index build:")
+                for l in build_err_lines[:5]:
+                    print(f"           {l}")
+                raise RuntimeError(f"index-build phase had {len(build_err_lines)} SQL errors")
+            build_stats = parse_diskann_stats(build_err)
+            print(f"  Build:   {t_build:.1f}s (CREATE INDEX over {inserted_so_far} rows)")
+            if build_time_stats:
+                print(
+                    f"          time: real={build_time_stats.get('real_s', 0):.2f}s  "
+                    f"user={build_time_stats.get('user_s', 0):.2f}s  "
+                    f"sys={build_time_stats.get('sys_s', 0):.2f}s"
+                )
+            if build_stats.get('build_total_ms') is not None:
+                table_s = build_stats.get('table_insert_ms', 0) / 1000
+                ib_s    = build_stats.get('build_total_ms', 0) / 1000
+                read_s  = build_stats.get('build_read_ms', 0) / 1000
+                write_s = build_stats.get('build_write_ms', 0) / 1000
+                dist_s  = build_stats.get('build_dist_ms', 0) / 1000
+                lsm_s   = build_stats.get('build_lsm_ms', 0) / 1000
+                print(
+                    f"          TableIns={table_s:.1f}s  "
+                    f"IndexBuild={ib_s:.1f}s  BuildRead={read_s:.1f}s  "
+                    f"BuildWrite={write_s:.1f}s  BuildDist={dist_s:.1f}s  "
+                    f"LSMWork={lsm_s:.1f}s"
+                )
+            print(f"          {format_io_summary(build_io)}")
+            for block in extract_c_stat_blocks(build_err):
+                print(block)
 
         # Compact (sqlite4 only, if enabled)
         t_compact = 0.0
@@ -646,16 +705,20 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             "total_rows": inserted_so_far,
             "pct": pct,
             "insert_s": round(t_insert, 2),
+            "build_s": round(t_build, 2),
             "compact_s": round(t_compact, 2),
             "ann_qps": round(ann_qps, 1),
             "gt_s": round(t_gt, 2),
             "recall": round(recall, 4),
             "db_mb": round(db_size, 1),
             "insert_disk_io": insert_io,
+            "build_disk_io": build_io,
             "compact_disk_io": compact_io,
             "query_disk_io": query_io,
             "insert_time_stats": ins_time_stats,
             "insert_stats": ins_stats,
+            "build_time_stats": build_time_stats,
+            "build_stats": build_stats,
             "compact_time_stats": compact_time_stats if need_compact else {},
             "query_time_stats": q_time_stats,
             "query_stats": q_stats,
@@ -781,23 +844,24 @@ def main():
 
     # Summary per config
     for run_label, results in all_results.items():
-        print(f"\n{'='*90}")
+        print(f"\n{'='*100}")
         print(f"  {run_label} — Incremental Results (k={args.k})")
-        print(f"{'='*90}")
+        print(f"{'='*100}")
         print(f"{'Batch':>6} {'Rows':>8} {'Total':>8} {'%':>5} "
-              f"{'Insert':>8} {'Compact':>8} {'ANN':>8} {'GT':>8} "
+              f"{'Insert':>8} {'Build':>8} {'Compact':>8} {'ANN':>8} {'GT':>8} "
               f"{'Recall':>8} {'DB':>8}")
         print(f"{'':>6} {'added':>8} {'rows':>8} {'':>5} "
-              f"{'(s)':>8} {'(s)':>8} {'(q/s)':>8} {'(s)':>8} "
+              f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(q/s)':>8} {'(s)':>8} "
               f"{'@k':>8} {'(MB)':>8}")
-        print(f"{'-'*90}")
+        print(f"{'-'*100}")
         for r in results:
+            build_str   = f"{r['build_s']:>8.1f}"   if r['build_s']   > 0 else f"{'---':>8}"
             compact_str = f"{r['compact_s']:>8.1f}" if r['compact_s'] > 0 else f"{'---':>8}"
             print(f"{r['batch']:>6} {r['rows_added']:>8} {r['total_rows']:>8} "
                   f"{r['pct']:>4}% {r['insert_s']:>8.1f} "
-                  f"{compact_str} {r['ann_qps']:>8.0f} {r['gt_s']:>8.1f} "
+                  f"{build_str} {compact_str} {r['ann_qps']:>8.0f} {r['gt_s']:>8.1f} "
                   f"{r['recall']:>8.4f} {r['db_mb']:>8.1f}")
-        print(f"{'='*90}")
+        print(f"{'='*100}")
 
 
 if __name__ == "__main__":
