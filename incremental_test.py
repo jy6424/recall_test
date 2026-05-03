@@ -291,21 +291,6 @@ def drop_caches(enabled=True):
         print(f"  WARNING: drop_caches failed: {e}")
 
 
-def run_compact(compact_bin, db, env=None):
-    cmd = [compact_bin, db]
-    if os.path.exists("/usr/bin/time"):
-        cmd = ["/usr/bin/time", "-f", f"{TIME_MARKER} real=%e user=%U sys=%S"] + cmd
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=20000,
-        env=env,
-    )
-    stderr_text, time_stats = parse_time_stats(proc.stderr)
-    return stderr_text, time_stats
-
-
 def file_size_mb(path):
     try:
         return os.path.getsize(path) / (1024 * 1024)
@@ -463,9 +448,9 @@ def compute_recall(ann_results, bf_results, k):
     return total_hits / total_possible if total_possible > 0 else 0.0
 
 
-def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
+def run_incremental(label, shell, insert_sql_path, query_sql_path,
                     all_ids, all_vecs, query_vecs, k, db_dir,
-                    distance_type="cosine", is_sqlite3=False, do_compact=False,
+                    distance_type="cosine", is_sqlite3=False,
                     do_drop_cache=False, io_log_dir=None, disk_device=DISK_DEVICE,
                     page_size_kb=None):
     """Run incremental insert experiment for one config."""
@@ -482,15 +467,11 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
     n_total = len(inserts)
     n_queries = len(ann_queries)
 
-    need_compact = do_compact and compact_bin and not is_sqlite3
-
     print(f"\n{'='*70}")
     print(f"  Config: {label}")
     print(f"  Shell:   {shell}")
     if not is_sqlite3 and page_size_kb is not None:
         print(f"  DB open: {db_target}")
-    if need_compact:
-        print(f"  Compact: {compact_bin}")
     print(f"  Total inserts: {n_total}, Queries: {n_queries}, k={k}")
     print(f"{'='*70}")
 
@@ -617,31 +598,6 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             for block in extract_c_stat_blocks(build_err):
                 print(block)
 
-        # Compact (sqlite4 only, if enabled)
-        t_compact = 0.0
-        compact_io = None
-        if need_compact:
-            drop_caches()
-            compact_log = None
-            if io_log_dir:
-                compact_log = os.path.join(io_log_dir, f"{label}_batch{batch_idx+1}_compact_io.csv")
-            compact_mon = DiskStatsMonitor(disk_device, log_path=compact_log).start()
-            t0 = time.time()
-            compact_out, compact_time_stats = run_compact(compact_bin, db_path, env=child_env)
-            t_compact = time.time() - t0
-            compact_io = compact_mon.stop()
-            print(f"  Compact: {t_compact:.1f}s")
-            if compact_time_stats:
-                print(
-                    f"          time: real={compact_time_stats.get('real_s', 0):.2f}s  "
-                    f"user={compact_time_stats.get('user_s', 0):.2f}s  "
-                    f"sys={compact_time_stats.get('sys_s', 0):.2f}s"
-                )
-            print(f"          {format_io_summary(compact_io)}")
-            for line in compact_out.split("\n"):
-                if line.startswith("Final:"):
-                    print(f"          {line.strip()}")
-
         db_size = file_size_mb(db_path)
 
         # ANN query (timed)
@@ -706,20 +662,17 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             "pct": pct,
             "insert_s": round(t_insert, 2),
             "build_s": round(t_build, 2),
-            "compact_s": round(t_compact, 2),
             "ann_qps": round(ann_qps, 1),
             "gt_s": round(t_gt, 2),
             "recall": round(recall, 4),
             "db_mb": round(db_size, 1),
             "insert_disk_io": insert_io,
             "build_disk_io": build_io,
-            "compact_disk_io": compact_io,
             "query_disk_io": query_io,
             "insert_time_stats": ins_time_stats,
             "insert_stats": ins_stats,
             "build_time_stats": build_time_stats,
             "build_stats": build_stats,
-            "compact_time_stats": compact_time_stats if need_compact else {},
             "query_time_stats": q_time_stats,
             "query_stats": q_stats,
         })
@@ -737,14 +690,11 @@ def main():
                         help="Comma-separated dataset names (default: glove,sift,coco,cohere)")
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--sqlite4-dir", type=str, default="./sqlite4_lsm",
-                        help="Directory containing sqlite4 and optional compact_db")
+                        help="Directory containing sqlite4")
     parser.add_argument("--sqlite3-dir", type=str, default="./sqlite3_libsql",
                         help="Directory containing sqlite3")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
-    parser.add_argument("--auto-compact", type=int, default=1, choices=[0, 1],
-                        help="0: use compact_db after each batch (autowork=0), "
-                             "1: skip compact_db (autowork=1 handles it)")
     parser.add_argument("--drop-cache", action="store_true",
                         help="Drop OS page cache before each timed phase (requires sudo)")
     parser.add_argument("--io-log-dir", type=str, default="./io_logs",
@@ -771,18 +721,16 @@ def main():
         print("Error: no valid datasets found.")
         return 1
 
-    # Build configs: (label, shell, compact_bin_or_None, is_sqlite3, page_size_kb)
+    # Build configs: (label, shell, is_sqlite3, page_size_kb)
     configs = []
 
     if args.sqlite4_dir:
         shell = os.path.join(args.sqlite4_dir, "sqlite4")
-        compact = os.path.join(args.sqlite4_dir, "compact_db")
         if not os.path.isfile(shell):
             print("Warning: sqlite4 binary missing, skipping sqlite4 configs")
         else:
-            compact_bin = compact if os.path.isfile(compact) else None
             for ps_kb in page_sizes_kb:
-                configs.append((f"lsm_{ps_kb}kb", shell, compact_bin, False, ps_kb))
+                configs.append((f"lsm_{ps_kb}kb", shell, False, ps_kb))
 
     if args.sqlite3_dir:
         shell = os.path.join(args.sqlite3_dir, "sqlite3")
@@ -790,16 +738,14 @@ def main():
             print("Warning: sqlite3 binary missing, skipping sqlite3 configs")
         else:
             for ps_kb in page_sizes_kb:
-                configs.append((f"sqlite3_{ps_kb}kb", shell, None, True, ps_kb))
+                configs.append((f"sqlite3_{ps_kb}kb", shell, True, ps_kb))
 
     if not configs:
         print("Error: no valid configurations found.")
         return 1
 
     print(f"Datasets: {', '.join(n for n, _, _ in datasets)}")
-    print(f"Configs:  {', '.join(l for l, _, _, _, _ in configs)}")
-    auto_compact = bool(args.auto_compact)
-    print(f"Auto-compact: {'ON (no compact_db)' if auto_compact else 'OFF (use compact_db)'}")
+    print(f"Configs:  {', '.join(l for l, _, _, _ in configs)}")
     print(f"Disk device: {args.disk_device}")
     print(f"I/O log dir: {args.io_log_dir}")
     print(f"DB dir:   {args.db_dir}")
@@ -825,13 +771,13 @@ def main():
         _, query_vecs = parse_query_sql(query_sql)
         print(f"  Parsed {len(query_vecs)} query vectors")
 
-        for label, shell, compact_bin, is_s3, ps_kb in configs:
+        for label, shell, is_s3, ps_kb in configs:
             run_label = f"{ds_name}_{label}"
             results = run_incremental(
-                run_label, shell, compact_bin, insert_sql, query_sql,
+                run_label, shell, insert_sql, query_sql,
                 all_ids, all_vecs, query_vecs,
                 args.k, args.db_dir, distance_type=dist_type,
-                is_sqlite3=is_s3, do_compact=not auto_compact,
+                is_sqlite3=is_s3,
                 do_drop_cache=args.drop_cache, io_log_dir=args.io_log_dir,
                 disk_device=args.disk_device, page_size_kb=ps_kb
             )
@@ -848,18 +794,17 @@ def main():
         print(f"  {run_label} — Incremental Results (k={args.k})")
         print(f"{'='*100}")
         print(f"{'Batch':>6} {'Rows':>8} {'Total':>8} {'%':>5} "
-              f"{'Insert':>8} {'Build':>8} {'Compact':>8} {'ANN':>8} {'GT':>8} "
+              f"{'Insert':>8} {'Build':>8} {'ANN':>8} {'GT':>8} "
               f"{'Recall':>8} {'DB':>8}")
         print(f"{'':>6} {'added':>8} {'rows':>8} {'':>5} "
-              f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(q/s)':>8} {'(s)':>8} "
+              f"{'(s)':>8} {'(s)':>8} {'(q/s)':>8} {'(s)':>8} "
               f"{'@k':>8} {'(MB)':>8}")
         print(f"{'-'*100}")
         for r in results:
-            build_str   = f"{r['build_s']:>8.1f}"   if r['build_s']   > 0 else f"{'---':>8}"
-            compact_str = f"{r['compact_s']:>8.1f}" if r['compact_s'] > 0 else f"{'---':>8}"
+            build_str = f"{r['build_s']:>8.1f}" if r['build_s'] > 0 else f"{'---':>8}"
             print(f"{r['batch']:>6} {r['rows_added']:>8} {r['total_rows']:>8} "
                   f"{r['pct']:>4}% {r['insert_s']:>8.1f} "
-                  f"{build_str} {compact_str} {r['ann_qps']:>8.0f} {r['gt_s']:>8.1f} "
+                  f"{build_str} {r['ann_qps']:>8.0f} {r['gt_s']:>8.1f} "
                   f"{r['recall']:>8.4f} {r['db_mb']:>8.1f}")
         print(f"{'='*100}")
 
