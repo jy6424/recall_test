@@ -15,6 +15,7 @@
 */
 #include "sqliteInt.h"
 #include "lsm.h"
+#include <lz4.h>
 #include <zlib.h>
 
 /* Forward declarations of objects */
@@ -44,6 +45,7 @@ struct KVLsmCsr {
 ** persists iId in database checkpoints, so keep this value stable.
 */
 #define KVLSM_COMPRESSION_ZLIB_ID 100
+#define KVLSM_COMPRESSION_LZ4_ID 101
 
 static int kvlsmZlibBound(void *pCtx, int nSrc){
   UNUSED_PARAMETER(pCtx);
@@ -95,6 +97,54 @@ static lsm_compress kvlsmZlibCompression = {
   0                               /* xFree */
 };
 
+static int kvlsmLz4Bound(void *pCtx, int nSrc){
+  UNUSED_PARAMETER(pCtx);
+  return LZ4_compressBound(nSrc);
+}
+
+static int kvlsmLz4Compress(
+  void *pCtx,
+  char *aOut, int *pnOut,
+  const char *aIn, int nIn
+){
+  int nOut;
+  UNUSED_PARAMETER(pCtx);
+
+  nOut = LZ4_compress_default(aIn, aOut, nIn, *pnOut);
+  if( nOut<=0 ){
+    return LSM_ERROR;
+  }
+
+  *pnOut = nOut;
+  return LSM_OK;
+}
+
+static int kvlsmLz4Uncompress(
+  void *pCtx,
+  char *aOut, int *pnOut,
+  const char *aIn, int nIn
+){
+  int nOut;
+  UNUSED_PARAMETER(pCtx);
+
+  nOut = LZ4_decompress_safe(aIn, aOut, nIn, *pnOut);
+  if( nOut<0 ){
+    return LSM_ERROR;
+  }
+
+  *pnOut = nOut;
+  return LSM_OK;
+}
+
+static lsm_compress kvlsmLz4Compression = {
+  0,                              /* pCtx */
+  KVLSM_COMPRESSION_LZ4_ID,       /* iId */
+  kvlsmLz4Bound,                  /* xBound */
+  kvlsmLz4Compress,               /* xCompress */
+  kvlsmLz4Uncompress,             /* xUncompress */
+  0                               /* xFree */
+};
+
 static int kvlsmConfigureCompression(lsm_db *pDb, const char *zName){
   const char *zVal = sqlite4_uri_parameter(zName, "lsm_compression");
   if( zVal==0 ){
@@ -105,6 +155,9 @@ static int kvlsmConfigureCompression(lsm_db *pDb, const char *zName){
   }
   if( sqlite4_stricmp(zVal, "zlib")==0 || sqlite4_stricmp(zVal, "1")==0 ){
     return lsm_config(pDb, LSM_CONFIG_SET_COMPRESSION, &kvlsmZlibCompression);
+  }
+  if( sqlite4_stricmp(zVal, "lz4")==0 || sqlite4_stricmp(zVal, "2")==0 ){
+    return lsm_config(pDb, LSM_CONFIG_SET_COMPRESSION, &kvlsmLz4Compression);
   }
   return LSM_ERROR;
 }

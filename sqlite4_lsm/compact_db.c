@@ -5,18 +5,20 @@
 ** Use this after bulk inserts when LSM_DFLT_AUTOWORK=0.
 **
 ** Build:
-**   gcc -O2 compact_db.c -I. -Isrc/ -L. -lsqlite4 -lpthread -lm -lz -o compact_db
+**   gcc -O2 compact_db.c -I. -Isrc/ -L. -lsqlite4 -lpthread -lm -lz -llz4 -o compact_db
 **
 ** Usage:
-**   ./compact_db /mnt/nvme0/mydb.db [none|zlib]
+**   ./compact_db /mnt/nvme0/mydb.db [none|zlib|lz4]
 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "src/lsm.h"
+#include <lz4.h>
 #include <zlib.h>
 
 #define COMPACT_COMPRESSION_ZLIB_ID 100
+#define COMPACT_COMPRESSION_LZ4_ID 101
 
 static int compactZlibBound(void *pCtx, int nSrc){
   (void)pCtx;
@@ -64,6 +66,50 @@ static lsm_compress compactZlibCompression = {
   0
 };
 
+static int compactLz4Bound(void *pCtx, int nSrc){
+  (void)pCtx;
+  return LZ4_compressBound(nSrc);
+}
+
+static int compactLz4Compress(
+  void *pCtx,
+  char *aOut, int *pnOut,
+  const char *aIn, int nIn
+){
+  int nOut;
+  (void)pCtx;
+
+  nOut = LZ4_compress_default(aIn, aOut, nIn, *pnOut);
+  if( nOut<=0 ) return LSM_ERROR;
+
+  *pnOut = nOut;
+  return LSM_OK;
+}
+
+static int compactLz4Uncompress(
+  void *pCtx,
+  char *aOut, int *pnOut,
+  const char *aIn, int nIn
+){
+  int nOut;
+  (void)pCtx;
+
+  nOut = LZ4_decompress_safe(aIn, aOut, nIn, *pnOut);
+  if( nOut<0 ) return LSM_ERROR;
+
+  *pnOut = nOut;
+  return LSM_OK;
+}
+
+static lsm_compress compactLz4Compression = {
+  0,
+  COMPACT_COMPRESSION_LZ4_ID,
+  compactLz4Bound,
+  compactLz4Compress,
+  compactLz4Uncompress,
+  0
+};
+
 int main(int argc, char **argv){
   lsm_db *pDb = 0;
   lsm_env *pEnv = lsm_default_env();
@@ -72,7 +118,7 @@ int main(int argc, char **argv){
   int rc;
 
   if( argc < 2 ){
-    fprintf(stderr, "Usage: %s <database_file> [none|zlib]\n", argv[0]);
+    fprintf(stderr, "Usage: %s <database_file> [none|zlib|lz4]\n", argv[0]);
     return 1;
   }
 
@@ -84,6 +130,13 @@ int main(int argc, char **argv){
 
   if( argc >= 3 && strcmp(argv[2], "zlib")==0 ){
     rc = lsm_config(pDb, LSM_CONFIG_SET_COMPRESSION, &compactZlibCompression);
+    if( rc != 0 ){
+      fprintf(stderr, "lsm_config compression failed: %d\n", rc);
+      lsm_close(pDb);
+      return 1;
+    }
+  }else if( argc >= 3 && strcmp(argv[2], "lz4")==0 ){
+    rc = lsm_config(pDb, LSM_CONFIG_SET_COMPRESSION, &compactLz4Compression);
     if( rc != 0 ){
       fprintf(stderr, "lsm_config compression failed: %d\n", rc);
       lsm_close(pDb);

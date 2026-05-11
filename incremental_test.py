@@ -662,7 +662,7 @@ def main():
                         help="Directory containing sqlite3")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
-    parser.add_argument("--lsm-compression", type=str, default="none", choices=["none", "zlib"],
+    parser.add_argument("--lsm-compression", type=str, default="none", choices=["none", "zlib", "lz4"],
                         help="LSM storage page compression for sqlite4 configs")
     parser.add_argument("--drop-cache", action="store_true",
                         help="Drop OS page cache before each timed phase (requires sudo)")

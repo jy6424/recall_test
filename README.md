@@ -29,6 +29,8 @@ hf download jiwanyuk/recall_test_dataset insert100k_sift.sql --repo-type dataset
 
 `sqlite4_lsm/` : 4kb, 16kb, 32kb, 64kb 페이지 사이즈 별 sqlite4 디렉토리 (컴파일 필요)
 
+zlib/lz4 압축을 사용하려면 빌드 전에 zlib, lz4 개발 패키지가 필요하다.
+
 컴파일 방법 : 4kb, 16kb, 32kb, 64kb 각 디렉토리에서 
 ```
 make -f Makefile.linux-gcc -B
@@ -36,7 +38,7 @@ make -f Makefile.linux-gcc -B
 
 추가로 각 디렉토리에서 
 ```
-gcc -O2 compact_db.c -I. -Isrc/ -L. -lsqlite4 -lpthread -lm -lz -o compact_db
+gcc -O2 compact_db.c -I. -Isrc/ -L. -lsqlite4 -lpthread -lm -lz -llz4 -o compact_db
 ```
 컴파일 (수동으로 compaction 하는 코드)
 
