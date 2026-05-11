@@ -18,6 +18,7 @@
 #include <string.h>
 #include <assert.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #define BT_LOCK_DMS1          0   /* DMS1 */
 #define BT_LOCK_DMS2_RW       1   /* DMS2/rw */
@@ -721,4 +722,3 @@ int sqlite4BtLockWriter(BtLock *pLock){
 int sqlite4BtLockWriterUnlock(BtLock *pLock){
   return btLockLockop(pLock, BT_LOCK_WRITER, BT_LOCK_UNLOCK, 0);
 }
-

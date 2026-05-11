@@ -1,6 +1,8 @@
 .libs/
 .target_source
 .vscode/
+*.o
+*.a
 /Makefile
 autom4te.cache/
 config.h
@@ -30,6 +32,8 @@ parse.out
 parse.sql
 /parse.y
 sqlite3
+/sqlite4
+/sqlite4.dSYM/
 /sqlite3.c
 /sqlite3.h
 sqlite3.lo

@@ -233,8 +233,10 @@ def run_shell(shell, db, sql_input, env=None):
     return proc.stdout, stderr_text, time_stats
 
 
-def run_compact(compact_bin, db, env=None):
+def run_compact(compact_bin, db, env=None, lsm_compression="none"):
     cmd = [compact_bin, db]
+    if lsm_compression and lsm_compression != "none":
+        cmd.append(lsm_compression)
     if os.path.exists("/usr/bin/time"):
         cmd = ["/usr/bin/time", "-f", f"{TIME_MARKER} real=%e user=%U sys=%S"] + cmd
     proc = subprocess.run(
@@ -286,11 +288,14 @@ def build_schema_sql(schema_lines, page_size_kb):
     return "\n".join([pragma] + schema_lines)
 
 
-def build_db_target(db_path, is_sqlite3=False, page_size_kb=None):
+def build_db_target(db_path, is_sqlite3=False, page_size_kb=None, lsm_compression="none"):
     """Return the shell target used to open the database."""
     if is_sqlite3 or page_size_kb is None:
         return db_path
-    return f"file:{db_path}?page_size={page_size_kb * 1024}"
+    params = [f"page_size={page_size_kb * 1024}"]
+    if lsm_compression and lsm_compression != "none":
+        params.append(f"lsm_compression={lsm_compression}")
+    return f"file:{db_path}?{'&'.join(params)}"
 
 
 def parse_output_to_results(output, k):
@@ -411,9 +416,14 @@ def format_io_summary(io_stats):
 def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                    gt_results, k, db_dir, is_sqlite3=False, auto_compact=False,
                    do_drop_cache=False, internal_io_timing=False, io_log_dir=None,
-                   page_size_kb=None):
+                   page_size_kb=None, lsm_compression="none"):
     db_path = os.path.join(db_dir, f"bench_{label}.db")
-    db_target = build_db_target(db_path, is_sqlite3=is_sqlite3, page_size_kb=page_size_kb)
+    db_target = build_db_target(
+        db_path,
+        is_sqlite3=is_sqlite3,
+        page_size_kb=page_size_kb,
+        lsm_compression=lsm_compression,
+    )
     cleanup_db(db_path, is_sqlite3)
     child_env = os.environ.copy()
     child_env["DISKANN_IO_TIMING"] = "1" if internal_io_timing else "0"
@@ -492,7 +502,9 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         print(f"  [2/{n_phases}] Compacting...")
         drop_caches()
         t0 = time.time()
-        compact_out, compact_time_stats = run_compact(compact_bin, db_path, env=child_env)
+        compact_out, compact_time_stats = run_compact(
+            compact_bin, db_path, env=child_env, lsm_compression=lsm_compression
+        )
         t_compact = time.time() - t0
         size_after = file_size_mb(db_path)
         result["compact_time_s"] = round(t_compact, 2)
@@ -594,6 +606,8 @@ def main():
                         help="Directory containing sqlite3")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
+    parser.add_argument("--lsm-compression", type=str, default="none", choices=["none", "zlib"],
+                        help="LSM storage page compression for sqlite4 configs")
     parser.add_argument("--auto-compact", type=int, default=1, choices=[0, 1],
                         help="0: use compact_db after insert (autowork=0), "
                              "1: skip compact_db (autowork=1 handles it)")
@@ -652,6 +666,7 @@ def main():
     auto_compact = bool(args.auto_compact)
     print(f"Datasets:     {', '.join(n for n, _, _, _ in datasets)}")
     print(f"Configs:      {', '.join(cfg[0] for cfg in configs)}")
+    print(f"LSM compression: {args.lsm_compression}")
     print(f"Auto-compact: {'ON (no compact_db)' if auto_compact else 'OFF (use compact_db)'}")
     print(f"Internal I/O timing: {'ON' if args.internal_io_timing else 'OFF'}")
     print(f"Disk device:  /dev/{DISK_DEVICE}")
@@ -683,7 +698,8 @@ def main():
                 gt_results, args.k, args.db_dir, is_sqlite3=is_s3,
                 auto_compact=auto_compact, do_drop_cache=args.drop_cache,
                 internal_io_timing=bool(args.internal_io_timing),
-                io_log_dir=args.io_log_dir, page_size_kb=ps_kb
+                io_log_dir=args.io_log_dir, page_size_kb=ps_kb,
+                lsm_compression=args.lsm_compression
             )
             ds_results.append(result)
 

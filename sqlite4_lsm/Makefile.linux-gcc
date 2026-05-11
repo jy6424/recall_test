@@ -45,6 +45,7 @@ THREADLIB = -lpthread
 #
 #TLIBS = -lrt    # fdatasync on Solaris 8
 TLIBS ?= -lm
+TLIBS += -lz
 
 #### Leave SQLITE4_DEBUG undefined for maximum speed.  Use SQLITE4_DEBUG=1
 #    to check for memory leaks.  Use SQLITE4_DEBUG=2 to print a log of all

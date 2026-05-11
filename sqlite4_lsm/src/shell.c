@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "sqlite4.h"
 
 #define MAX_LINE 65536
@@ -72,7 +73,8 @@ int main(int argc, char **argv) {
 
     rc = sqlite4_open(0, zFile, &db, 0);
     if (rc != SQLITE4_OK) {
-        fprintf(stderr, "Cannot open database '%s': %d\n", zFile, rc);
+        fprintf(stderr, "Cannot open database '%s': %d%s%s\n",
+                zFile, rc, db ? ": " : "", db ? sqlite4_errmsg(db) : "");
         return 1;
     }
 
@@ -132,4 +134,3 @@ int main(int argc, char **argv) {
     sqlite4_close(db, 0);
     return gHasError ? 1 : 0;
 }
-

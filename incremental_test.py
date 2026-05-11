@@ -338,10 +338,13 @@ def build_schema_sql(schema_lines, page_size_kb):
     return "\n".join([pragma] + schema_lines)
 
 
-def build_db_target(db_path, is_sqlite3=False, page_size_kb=None):
+def build_db_target(db_path, is_sqlite3=False, page_size_kb=None, lsm_compression="none"):
     if is_sqlite3 or page_size_kb is None:
         return db_path
-    return f"file:{db_path}?page_size={page_size_kb * 1024}"
+    params = [f"page_size={page_size_kb * 1024}"]
+    if lsm_compression and lsm_compression != "none":
+        params.append(f"lsm_compression={lsm_compression}")
+    return f"file:{db_path}?{'&'.join(params)}"
 
 
 def parse_query_sql(sql_path):
@@ -453,11 +456,16 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
                     distance_type="cosine", is_sqlite3=False,
                     do_drop_cache=False, internal_io_timing=True,
                     io_log_dir=None, disk_device=DISK_DEVICE,
-                    page_size_kb=None):
+                    page_size_kb=None, lsm_compression="none"):
     """Run incremental insert experiment for one config."""
 
     db_path = os.path.join(db_dir, f"incr_{label}.db")
-    db_target = build_db_target(db_path, is_sqlite3=is_sqlite3, page_size_kb=page_size_kb)
+    db_target = build_db_target(
+        db_path,
+        is_sqlite3=is_sqlite3,
+        page_size_kb=page_size_kb,
+        lsm_compression=lsm_compression,
+    )
     cleanup_db(db_path, is_sqlite3)
     child_env = os.environ.copy()
     child_env["DISKANN_IO_TIMING"] = "1" if internal_io_timing else "0"
@@ -654,6 +662,8 @@ def main():
                         help="Directory containing sqlite3")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
+    parser.add_argument("--lsm-compression", type=str, default="none", choices=["none", "zlib"],
+                        help="LSM storage page compression for sqlite4 configs")
     parser.add_argument("--drop-cache", action="store_true",
                         help="Drop OS page cache before each timed phase (requires sudo)")
     parser.add_argument("--internal-io-timing", type=int, default=1, choices=[0, 1],
@@ -707,6 +717,7 @@ def main():
 
     print(f"Datasets: {', '.join(n for n, _, _ in datasets)}")
     print(f"Configs:  {', '.join(l for l, _, _, _ in configs)}")
+    print(f"LSM compression: {args.lsm_compression}")
     print(f"Internal I/O timing: {'ON' if args.internal_io_timing else 'OFF'}")
     print(f"Disk device: {args.disk_device}")
     print(f"I/O log dir: {args.io_log_dir}")
@@ -743,7 +754,8 @@ def main():
                 do_drop_cache=args.drop_cache,
                 internal_io_timing=bool(args.internal_io_timing),
                 io_log_dir=args.io_log_dir,
-                disk_device=args.disk_device, page_size_kb=ps_kb
+                disk_device=args.disk_device, page_size_kb=ps_kb,
+                lsm_compression=args.lsm_compression
             )
             all_results[run_label] = results
 

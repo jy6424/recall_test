@@ -36,7 +36,7 @@ make -f Makefile.linux-gcc -B
 
 추가로 각 디렉토리에서 
 ```
-gcc -O2 compact_db.c -I. -Isrc/ -L. -lsqlite4 -lpthread -lm -o compact_db
+gcc -O2 compact_db.c -I. -Isrc/ -L. -lsqlite4 -lpthread -lm -lz -o compact_db
 ```
 컴파일 (수동으로 compaction 하는 코드)
 
@@ -90,4 +90,3 @@ make -j
     ```
 
     incremental_test.py 안에 추가로 사용할 수 있는 옵션들 있으니 확인
-

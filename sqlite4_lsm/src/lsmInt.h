@@ -688,6 +688,7 @@ int lsmFsConfigure(lsm_db *db);
 int lsmFsBlockSize(FileSystem *);
 void lsmFsSetBlockSize(FileSystem *, int);
 void lsmFsUpdateSegPages(FileSystem *, Segment *, int iTo, int iFrom);
+int lsmFsMoveBlock(FileSystem *, Segment *, int iTo, int iFrom);
 
 int lsmFsPageSize(FileSystem *);
 void lsmFsSetPageSize(FileSystem *, int);

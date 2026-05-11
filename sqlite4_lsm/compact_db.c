@@ -5,14 +5,64 @@
 ** Use this after bulk inserts when LSM_DFLT_AUTOWORK=0.
 **
 ** Build:
-**   gcc -O2 compact_db.c -I. -Isrc/ -L. -lsqlite4 -lpthread -lm -o compact_db
+**   gcc -O2 compact_db.c -I. -Isrc/ -L. -lsqlite4 -lpthread -lm -lz -o compact_db
 **
 ** Usage:
-**   ./compact_db /mnt/nvme0/mydb.db
+**   ./compact_db /mnt/nvme0/mydb.db [none|zlib]
 */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "src/lsm.h"
+#include <zlib.h>
+
+#define COMPACT_COMPRESSION_ZLIB_ID 100
+
+static int compactZlibBound(void *pCtx, int nSrc){
+  (void)pCtx;
+  return (int)compressBound((uLong)nSrc);
+}
+
+static int compactZlibCompress(
+  void *pCtx,
+  char *aOut, int *pnOut,
+  const char *aIn, int nIn
+){
+  uLongf nOut = (uLongf)*pnOut;
+  int rc;
+  (void)pCtx;
+
+  rc = compress((Bytef*)aOut, &nOut, (const Bytef*)aIn, (uLong)nIn);
+  if( rc!=Z_OK ) return LSM_ERROR;
+
+  *pnOut = (int)nOut;
+  return LSM_OK;
+}
+
+static int compactZlibUncompress(
+  void *pCtx,
+  char *aOut, int *pnOut,
+  const char *aIn, int nIn
+){
+  uLongf nOut = (uLongf)*pnOut;
+  int rc;
+  (void)pCtx;
+
+  rc = uncompress((Bytef*)aOut, &nOut, (const Bytef*)aIn, (uLong)nIn);
+  if( rc!=Z_OK ) return LSM_ERROR;
+
+  *pnOut = (int)nOut;
+  return LSM_OK;
+}
+
+static lsm_compress compactZlibCompression = {
+  0,
+  COMPACT_COMPRESSION_ZLIB_ID,
+  compactZlibBound,
+  compactZlibCompress,
+  compactZlibUncompress,
+  0
+};
 
 int main(int argc, char **argv){
   lsm_db *pDb = 0;
@@ -22,7 +72,7 @@ int main(int argc, char **argv){
   int rc;
 
   if( argc < 2 ){
-    fprintf(stderr, "Usage: %s <database_file>\n", argv[0]);
+    fprintf(stderr, "Usage: %s <database_file> [none|zlib]\n", argv[0]);
     return 1;
   }
 
@@ -30,6 +80,15 @@ int main(int argc, char **argv){
   if( rc != 0 ){
     fprintf(stderr, "lsm_new failed: %d\n", rc);
     return 1;
+  }
+
+  if( argc >= 3 && strcmp(argv[2], "zlib")==0 ){
+    rc = lsm_config(pDb, LSM_CONFIG_SET_COMPRESSION, &compactZlibCompression);
+    if( rc != 0 ){
+      fprintf(stderr, "lsm_config compression failed: %d\n", rc);
+      lsm_close(pDb);
+      return 1;
+    }
   }
 
   rc = lsm_open(pDb, argv[1]);

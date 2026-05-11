@@ -15,6 +15,7 @@
 */
 #include "sqliteInt.h"
 #include "lsm.h"
+#include <zlib.h>
 
 /* Forward declarations of objects */
 typedef struct KVLsm KVLsm;
@@ -37,6 +38,76 @@ struct KVLsmCsr {
   KVCursor base;                  /* Base class. Must be first */
   lsm_cursor *pCsr;               /* LSM cursor handle */
 };
+
+/*
+** zlib-backed page compression for the LSM storage engine. The LSM layer
+** persists iId in database checkpoints, so keep this value stable.
+*/
+#define KVLSM_COMPRESSION_ZLIB_ID 100
+
+static int kvlsmZlibBound(void *pCtx, int nSrc){
+  UNUSED_PARAMETER(pCtx);
+  return (int)compressBound((uLong)nSrc);
+}
+
+static int kvlsmZlibCompress(
+  void *pCtx,
+  char *aOut, int *pnOut,
+  const char *aIn, int nIn
+){
+  uLongf nOut = (uLongf)*pnOut;
+  int rc;
+  UNUSED_PARAMETER(pCtx);
+
+  rc = compress((Bytef*)aOut, &nOut, (const Bytef*)aIn, (uLong)nIn);
+  if( rc!=Z_OK ){
+    return LSM_ERROR;
+  }
+
+  *pnOut = (int)nOut;
+  return LSM_OK;
+}
+
+static int kvlsmZlibUncompress(
+  void *pCtx,
+  char *aOut, int *pnOut,
+  const char *aIn, int nIn
+){
+  uLongf nOut = (uLongf)*pnOut;
+  int rc;
+  UNUSED_PARAMETER(pCtx);
+
+  rc = uncompress((Bytef*)aOut, &nOut, (const Bytef*)aIn, (uLong)nIn);
+  if( rc!=Z_OK ){
+    return LSM_ERROR;
+  }
+
+  *pnOut = (int)nOut;
+  return LSM_OK;
+}
+
+static lsm_compress kvlsmZlibCompression = {
+  0,                              /* pCtx */
+  KVLSM_COMPRESSION_ZLIB_ID,      /* iId */
+  kvlsmZlibBound,                 /* xBound */
+  kvlsmZlibCompress,              /* xCompress */
+  kvlsmZlibUncompress,            /* xUncompress */
+  0                               /* xFree */
+};
+
+static int kvlsmConfigureCompression(lsm_db *pDb, const char *zName){
+  const char *zVal = sqlite4_uri_parameter(zName, "lsm_compression");
+  if( zVal==0 ){
+    zVal = sqlite4_uri_parameter(zName, "compression");
+  }
+  if( zVal==0 || sqlite4_stricmp(zVal, "none")==0 || sqlite4_stricmp(zVal, "0")==0 ){
+    return LSM_OK;
+  }
+  if( sqlite4_stricmp(zVal, "zlib")==0 || sqlite4_stricmp(zVal, "1")==0 ){
+    return lsm_config(pDb, LSM_CONFIG_SET_COMPRESSION, &kvlsmZlibCompression);
+  }
+  return LSM_ERROR;
+}
   
 /*
 ** Begin a transaction or subtransaction.
@@ -614,7 +685,10 @@ int sqlite4KVStoreOpenLsm(
         }
       }
 
-      rc = lsm_open(pNew->pDb, zName);
+      rc = kvlsmConfigureCompression(pNew->pDb, zName);
+      if( rc==SQLITE4_OK ){
+        rc = lsm_open(pNew->pDb, zName);
+      }
     }
 
     if( rc!=SQLITE4_OK ){
