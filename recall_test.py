@@ -298,6 +298,12 @@ def build_db_target(db_path, is_sqlite3=False, page_size_kb=None, lsm_compressio
     return f"file:{db_path}?{'&'.join(params)}"
 
 
+def with_sqlite3_synchronous(sql_text, is_sqlite3=False, sqlite3_synchronous=None):
+    if not is_sqlite3 or sqlite3_synchronous is None:
+        return sql_text
+    return f"PRAGMA synchronous={sqlite3_synchronous};\n{sql_text}"
+
+
 def parse_output_to_results(output, k):
     """Parse shell output into list of sets of IDs, chunked by k."""
     id_lines = []
@@ -416,7 +422,7 @@ def format_io_summary(io_stats):
 def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                    gt_results, k, db_dir, is_sqlite3=False, auto_compact=False,
                    do_drop_cache=False, internal_io_timing=False, io_log_dir=None,
-                   page_size_kb=None, lsm_compression="none"):
+                   page_size_kb=None, lsm_compression="none", sqlite3_synchronous=None):
     db_path = os.path.join(db_dir, f"bench_{label}.db")
     db_target = build_db_target(
         db_path,
@@ -428,13 +434,18 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     child_env = os.environ.copy()
     child_env["DISKANN_IO_TIMING"] = "1" if internal_io_timing else "0"
 
-    result = {"label": label}
+    result = {
+        "label": label,
+        "sqlite3_synchronous": sqlite3_synchronous if is_sqlite3 else "",
+    }
     need_compact = not is_sqlite3 and not auto_compact and compact_bin
     n_phases = 4 if need_compact else 3
 
     print(f"\n{'='*60}")
     print(f"  Config: {label}")
     print(f"  Shell:   {shell}")
+    if is_sqlite3 and sqlite3_synchronous is not None:
+        print(f"  SQLite3 synchronous: {sqlite3_synchronous}")
     if not is_sqlite3 and page_size_kb is not None:
         print(f"  DB open: {db_target}")
     if need_compact:
@@ -446,14 +457,24 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     schema_lines, insert_lines = split_schema_inserts(insert_sql)
 
     print(f"  [1/{n_phases}] Schema + Insert...")
-    run_shell(shell, db_target, "\n".join(schema_lines), env=child_env)  # ignore return tuple
+    schema_sql = with_sqlite3_synchronous(
+        "\n".join(schema_lines),
+        is_sqlite3=is_sqlite3,
+        sqlite3_synchronous=sqlite3_synchronous,
+    )
+    run_shell(shell, db_target, schema_sql, env=child_env)  # ignore return tuple
 
     # Insert (timed — equivalent to ann-benchmarks fit())
     drop_caches(do_drop_cache)
     insert_log = os.path.join(io_log_dir, f"{label}_insert_io.csv") if io_log_dir else None
     insert_mon = DiskStatsMonitor(DISK_DEVICE, log_path=insert_log).start()
     t0 = time.time()
-    ins_out, ins_err, ins_time = run_shell(shell, db_target, "\n".join(insert_lines), env=child_env)
+    insert_sql_run = with_sqlite3_synchronous(
+        "\n".join(insert_lines),
+        is_sqlite3=is_sqlite3,
+        sqlite3_synchronous=sqlite3_synchronous,
+    )
+    ins_out, ins_err, ins_time = run_shell(shell, db_target, insert_sql_run, env=child_env)
     t_insert = time.time() - t0
     result["insert_disk_io"] = insert_mon.stop()
 
@@ -528,7 +549,11 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     # Query (timed)
     phase_q = 3 if need_compact else 2
     print(f"  [{phase_q}/{n_phases}] Querying...")
-    query_sql = read_sql(query_sql_path)
+    query_sql = with_sqlite3_synchronous(
+        read_sql(query_sql_path),
+        is_sqlite3=is_sqlite3,
+        sqlite3_synchronous=sqlite3_synchronous,
+    )
 
     drop_caches(do_drop_cache)
     query_log = os.path.join(io_log_dir, f"{label}_query_io.csv") if io_log_dir else None
@@ -604,6 +629,11 @@ def main():
                         help="Directory containing sqlite4 and optional compact_db")
     parser.add_argument("--sqlite3-dir", type=str, default="./sqlite3_libsql",
                         help="Directory containing sqlite3")
+    parser.add_argument("--sqlite3-synchronous", type=str, default=None,
+                        choices=["0", "1", "2", "3", "OFF", "NORMAL", "FULL", "EXTRA",
+                                 "off", "normal", "full", "extra"],
+                        help="Set PRAGMA synchronous for sqlite3_libsql configs only "
+                             "(0/OFF, 1/NORMAL, 2/FULL, 3/EXTRA). Default: sqlite3 build default")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
     parser.add_argument("--lsm-compression", type=str, default="none", choices=["none", "zlib", "lz4"],
@@ -667,6 +697,7 @@ def main():
     print(f"Datasets:     {', '.join(n for n, _, _, _ in datasets)}")
     print(f"Configs:      {', '.join(cfg[0] for cfg in configs)}")
     print(f"LSM compression: {args.lsm_compression}")
+    print(f"SQLite3 synchronous: {args.sqlite3_synchronous or 'default'}")
     print(f"Auto-compact: {'ON (no compact_db)' if auto_compact else 'OFF (use compact_db)'}")
     print(f"Internal I/O timing: {'ON' if args.internal_io_timing else 'OFF'}")
     print(f"Disk device:  /dev/{DISK_DEVICE}")
@@ -699,7 +730,8 @@ def main():
                 auto_compact=auto_compact, do_drop_cache=args.drop_cache,
                 internal_io_timing=bool(args.internal_io_timing),
                 io_log_dir=args.io_log_dir, page_size_kb=ps_kb,
-                lsm_compression=args.lsm_compression
+                lsm_compression=args.lsm_compression,
+                sqlite3_synchronous=args.sqlite3_synchronous
             )
             ds_results.append(result)
 

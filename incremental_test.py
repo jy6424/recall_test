@@ -347,6 +347,12 @@ def build_db_target(db_path, is_sqlite3=False, page_size_kb=None, lsm_compressio
     return f"file:{db_path}?{'&'.join(params)}"
 
 
+def with_sqlite3_synchronous(sql_text, is_sqlite3=False, sqlite3_synchronous=None):
+    if not is_sqlite3 or sqlite3_synchronous is None:
+        return sql_text
+    return f"PRAGMA synchronous={sqlite3_synchronous};\n{sql_text}"
+
+
 def parse_query_sql(sql_path):
     """Extract ANN query lines and query vectors from query SQL.
     Returns (ann_queries: list[str], query_vecs: np.ndarray)."""
@@ -456,7 +462,7 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
                     distance_type="cosine", is_sqlite3=False,
                     do_drop_cache=False, internal_io_timing=True,
                     io_log_dir=None, disk_device=DISK_DEVICE,
-                    page_size_kb=None, lsm_compression="none"):
+                    page_size_kb=None, lsm_compression="none", sqlite3_synchronous=None):
     """Run incremental insert experiment for one config."""
 
     db_path = os.path.join(db_dir, f"incr_{label}.db")
@@ -479,6 +485,8 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
     print(f"\n{'='*70}")
     print(f"  Config: {label}")
     print(f"  Shell:   {shell}")
+    if is_sqlite3 and sqlite3_synchronous is not None:
+        print(f"  SQLite3 synchronous: {sqlite3_synchronous}")
     if not is_sqlite3 and page_size_kb is not None:
         print(f"  DB open: {db_target}")
     print(f"  Total inserts: {n_total}, Queries: {n_queries}, k={k}")
@@ -496,6 +504,11 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
         schema_sql = build_schema_sql(setup_lines, page_size_kb)
     else:
         schema_sql = "\n".join(setup_lines)
+    schema_sql = with_sqlite3_synchronous(
+        schema_sql,
+        is_sqlite3=is_sqlite3,
+        sqlite3_synchronous=sqlite3_synchronous,
+    )
     run_shell(shell, db_target, schema_sql, env=child_env)
     print(f"  Schema/index created")
 
@@ -514,7 +527,11 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
               f"(total: {inserted_so_far}/{n_total}, {pct}%) ---")
 
         # Insert batch (timed)
-        batch_sql = "\n".join(batch_inserts)
+        batch_sql = with_sqlite3_synchronous(
+            "\n".join(batch_inserts),
+            is_sqlite3=is_sqlite3,
+            sqlite3_synchronous=sqlite3_synchronous,
+        )
         drop_caches(do_drop_cache)
         insert_log = None
         if io_log_dir:
@@ -571,7 +588,12 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
             query_log = os.path.join(io_log_dir, f"{label}_batch{batch_idx+1}_query_io.csv")
         query_mon = DiskStatsMonitor(disk_device, log_path=query_log).start()
         t0 = time.time()
-        ann_out, q_err, q_time_stats = run_shell(shell, db_target, ann_sql, env=child_env)
+        ann_sql_run = with_sqlite3_synchronous(
+            ann_sql,
+            is_sqlite3=is_sqlite3,
+            sqlite3_synchronous=sqlite3_synchronous,
+        )
+        ann_out, q_err, q_time_stats = run_shell(shell, db_target, ann_sql_run, env=child_env)
         t_ann = time.time() - t0
         query_io = query_mon.stop()
         q_err_lines = [l for l in q_err.splitlines() if l.startswith("Error:")]
@@ -622,6 +644,7 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
 
         results.append({
             "batch": batch_idx + 1,
+            "sqlite3_synchronous": sqlite3_synchronous if is_sqlite3 else "",
             "rows_added": batch_size,
             "total_rows": inserted_so_far,
             "pct": pct,
@@ -660,6 +683,11 @@ def main():
                         help="Directory containing sqlite4")
     parser.add_argument("--sqlite3-dir", type=str, default="./sqlite3_libsql",
                         help="Directory containing sqlite3")
+    parser.add_argument("--sqlite3-synchronous", type=str, default=None,
+                        choices=["0", "1", "2", "3", "OFF", "NORMAL", "FULL", "EXTRA",
+                                 "off", "normal", "full", "extra"],
+                        help="Set PRAGMA synchronous for sqlite3_libsql configs only "
+                             "(0/OFF, 1/NORMAL, 2/FULL, 3/EXTRA). Default: sqlite3 build default")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
     parser.add_argument("--lsm-compression", type=str, default="none", choices=["none", "zlib", "lz4"],
@@ -718,6 +746,7 @@ def main():
     print(f"Datasets: {', '.join(n for n, _, _ in datasets)}")
     print(f"Configs:  {', '.join(l for l, _, _, _ in configs)}")
     print(f"LSM compression: {args.lsm_compression}")
+    print(f"SQLite3 synchronous: {args.sqlite3_synchronous or 'default'}")
     print(f"Internal I/O timing: {'ON' if args.internal_io_timing else 'OFF'}")
     print(f"Disk device: {args.disk_device}")
     print(f"I/O log dir: {args.io_log_dir}")
@@ -755,7 +784,8 @@ def main():
                 internal_io_timing=bool(args.internal_io_timing),
                 io_log_dir=args.io_log_dir,
                 disk_device=args.disk_device, page_size_kb=ps_kb,
-                lsm_compression=args.lsm_compression
+                lsm_compression=args.lsm_compression,
+                sqlite3_synchronous=args.sqlite3_synchronous
             )
             all_results[run_label] = results
 
