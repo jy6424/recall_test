@@ -589,7 +589,7 @@ static void kvlsmPragma(sqlite4_context *ctx, int nArg, sqlite4_value **apArg){
     }
 
     case KVLSM_LSM_CONFIG: {
-      int iVal = 0;
+      int iVal = -1;
       if( nArg>1 ) goto wrong_num_args;
       if( nArg==1 ){
         iVal = sqlite4_value_int(apArg[0]);
