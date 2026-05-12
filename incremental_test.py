@@ -353,6 +353,12 @@ def with_sqlite3_synchronous(sql_text, is_sqlite3=False, sqlite3_synchronous=Non
     return f"PRAGMA synchronous={sqlite3_synchronous};\n{sql_text}"
 
 
+def with_lsm_safety(sql_text, is_sqlite3=False, lsm_safety=None):
+    if is_sqlite3 or lsm_safety is None:
+        return sql_text
+    return f"PRAGMA lsm_safety={lsm_safety};\n{sql_text}"
+
+
 def parse_query_sql(sql_path):
     """Extract ANN query lines and query vectors from query SQL.
     Returns (ann_queries: list[str], query_vecs: np.ndarray)."""
@@ -462,7 +468,8 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
                     distance_type="cosine", is_sqlite3=False,
                     do_drop_cache=False, internal_io_timing=True,
                     io_log_dir=None, disk_device=DISK_DEVICE,
-                    page_size_kb=None, lsm_compression="none", sqlite3_synchronous=None):
+                    page_size_kb=None, lsm_compression="none", sqlite3_synchronous=None,
+                    lsm_safety=None):
     """Run incremental insert experiment for one config."""
 
     db_path = os.path.join(db_dir, f"incr_{label}.db")
@@ -487,6 +494,8 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
     print(f"  Shell:   {shell}")
     if is_sqlite3 and sqlite3_synchronous is not None:
         print(f"  SQLite3 synchronous: {sqlite3_synchronous}")
+    if not is_sqlite3 and lsm_safety is not None:
+        print(f"  LSM safety: {lsm_safety}")
     if not is_sqlite3 and page_size_kb is not None:
         print(f"  DB open: {db_target}")
     print(f"  Total inserts: {n_total}, Queries: {n_queries}, k={k}")
@@ -509,6 +518,7 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
         is_sqlite3=is_sqlite3,
         sqlite3_synchronous=sqlite3_synchronous,
     )
+    schema_sql = with_lsm_safety(schema_sql, is_sqlite3=is_sqlite3, lsm_safety=lsm_safety)
     run_shell(shell, db_target, schema_sql, env=child_env)
     print(f"  Schema/index created")
 
@@ -532,6 +542,7 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
             is_sqlite3=is_sqlite3,
             sqlite3_synchronous=sqlite3_synchronous,
         )
+        batch_sql = with_lsm_safety(batch_sql, is_sqlite3=is_sqlite3, lsm_safety=lsm_safety)
         drop_caches(do_drop_cache)
         insert_log = None
         if io_log_dir:
@@ -593,6 +604,7 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
             is_sqlite3=is_sqlite3,
             sqlite3_synchronous=sqlite3_synchronous,
         )
+        ann_sql_run = with_lsm_safety(ann_sql_run, is_sqlite3=is_sqlite3, lsm_safety=lsm_safety)
         ann_out, q_err, q_time_stats = run_shell(shell, db_target, ann_sql_run, env=child_env)
         t_ann = time.time() - t0
         query_io = query_mon.stop()
@@ -645,6 +657,7 @@ def run_incremental(label, shell, insert_sql_path, query_sql_path,
         results.append({
             "batch": batch_idx + 1,
             "sqlite3_synchronous": sqlite3_synchronous if is_sqlite3 else "",
+            "lsm_safety": lsm_safety if not is_sqlite3 else "",
             "rows_added": batch_size,
             "total_rows": inserted_so_far,
             "pct": pct,
@@ -692,6 +705,11 @@ def main():
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
     parser.add_argument("--lsm-compression", type=str, default="none", choices=["none", "zlib", "lz4"],
                         help="LSM storage page compression for sqlite4 configs")
+    parser.add_argument("--lsm-safety", type=str, default=None,
+                        choices=["0", "1", "2", "OFF", "NORMAL", "FULL",
+                                 "off", "normal", "full"],
+                        help="Set PRAGMA lsm_safety for sqlite4_lsm configs only "
+                             "(0/OFF, 1/NORMAL, 2/FULL). Default: sqlite4 build default")
     parser.add_argument("--drop-cache", action="store_true",
                         help="Drop OS page cache before each timed phase (requires sudo)")
     parser.add_argument("--internal-io-timing", type=int, default=1, choices=[0, 1],
@@ -746,6 +764,7 @@ def main():
     print(f"Datasets: {', '.join(n for n, _, _ in datasets)}")
     print(f"Configs:  {', '.join(l for l, _, _, _ in configs)}")
     print(f"LSM compression: {args.lsm_compression}")
+    print(f"LSM safety: {args.lsm_safety or 'default'}")
     print(f"SQLite3 synchronous: {args.sqlite3_synchronous or 'default'}")
     print(f"Internal I/O timing: {'ON' if args.internal_io_timing else 'OFF'}")
     print(f"Disk device: {args.disk_device}")
@@ -785,7 +804,8 @@ def main():
                 io_log_dir=args.io_log_dir,
                 disk_device=args.disk_device, page_size_kb=ps_kb,
                 lsm_compression=args.lsm_compression,
-                sqlite3_synchronous=args.sqlite3_synchronous
+                sqlite3_synchronous=args.sqlite3_synchronous,
+                lsm_safety=args.lsm_safety
             )
             all_results[run_label] = results
 
