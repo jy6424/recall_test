@@ -649,7 +649,7 @@ static int kvlsmGetMethod(
     ePragma = KVLSM_LSM_CHECKPOINT;
   }else{
     for(i=0; i<ArraySize(aConfigPragma); i++){
-      if( 0==sqlite4_strnicmp(zMethod, aConfigPragma[i].zName, -1) ){
+      if( 0==sqlite4_stricmp(zMethod, aConfigPragma[i].zName) ){
         ePragma = KVLSM_LSM_CONFIG;
         eConfig = aConfigPragma[i].eConfig;
         break;
