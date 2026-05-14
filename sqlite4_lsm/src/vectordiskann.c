@@ -58,6 +58,8 @@ static long long g_queryEdgesExamined = 0; /* total edges examined */
 static double g_queryDistanceMs = 0;    /* distance computation time */
 static double g_buildDistanceMs = 0;    /* distance computation during build */
 
+#define DISKANN_LSM_TXN_CYCLE_ROWS_DEFAULT 512
+
 /* Auto-compaction timing globals from lsm_sorted.c */
 extern double g_autoworkTotalMs;
 static int g_ioTimingEnabled = -1;
@@ -68,6 +70,16 @@ static int diskAnnIoTimingEnabled(void){
     g_ioTimingEnabled = (zEnv && zEnv[0] && zEnv[0] != '0') ? 1 : 0;
   }
   return g_ioTimingEnabled;
+}
+
+static int diskAnnLsmTxnCycleRows(void){
+  static int nCycle = 0;
+  if( nCycle==0 ){
+    const char *zEnv = getenv("DISKANN_LSM_TXN_CYCLE_ROWS");
+    nCycle = zEnv ? atoi(zEnv) : 0;
+    if( nCycle<=0 ) nCycle = DISKANN_LSM_TXN_CYCLE_ROWS_DEFAULT;
+  }
+  return nCycle;
 }
 
 // #define SQLITE4_VECTOR_TRACE
@@ -442,6 +454,24 @@ int blobSpotFlush(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot) {
   if( rc != SQLITE4_OK ) return rc;
   pIndex->nWrites++;
   return SQLITE4_OK;
+}
+
+static int diskAnnCycleLsmWriteTxn(DiskAnnIndex *pIndex){
+  int rc;
+  KVStore *pKV = pIndex->db->aDb[0].pKV;
+
+  if( pKV==0 || pKV->iTransLevel<2 ) return SQLITE4_OK;
+
+  if( pIndex->pReadCsr ){
+    sqlite4KVCursorClose(pIndex->pReadCsr);
+    pIndex->pReadCsr = NULL;
+  }
+
+  rc = sqlite4KVStoreCommit(pKV, 0);
+  if( rc==SQLITE4_OK ){
+    rc = sqlite4KVStoreBegin(pKV, 2);
+  }
+  return rc;
 }
 
 void blobSpotFree(BlobSpot *pBlobSpot) {
@@ -1831,6 +1861,17 @@ out:
     blobSpotFree(pBlobSpot);
   }
   diskAnnSearchCtxDeinit(&ctx);
+
+  if( rc==SQLITE4_OK && pIndex->nShadowRows>0 ){
+    int nCycle = diskAnnLsmTxnCycleRows();
+    if( nCycle>0 && (pIndex->nShadowRows % nCycle)==0 ){
+      rc = diskAnnCycleLsmWriteTxn(pIndex);
+      if( rc!=SQLITE4_OK ){
+        *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv,
+            "vector index(insert): failed to cycle LSM write transaction");
+      }
+    }
+  }
 
   return rc;
 }

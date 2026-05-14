@@ -2321,11 +2321,41 @@ static void sqlite4RefillIndex(Parse *pParse, Index *pIdx, int bCreate){
   }
 #ifndef SQLITE4_OMIT_VECTOR
   if( IsVectorIndex(pIdx) ){
+    int iEph = pParse->nTab++;
+    int regPair = sqlite4GetTempRange(pParse, 2);
+    int regRowid = regPair;
+    int regVec = regPair+1;
+    int regRec = sqlite4GetTempReg(pParse);
     KeyInfo *pVecKey = sqlite4IndexKeyinfo(pParse, pIdx);
+
+    sqlite4VdbeAddOp2(v, OP_OpenEphemeral, iEph, 2);
+
+    addr1 = sqlite4VdbeAddOp2(v, OP_Rewind, iTab, 0);
+    sqlite4VdbeAddOp2(v, OP_Rowid, iTab, regRowid);
+    sqlite4VdbeAddOp3(v, OP_Column, iTab, pIdx->aiColumn[0], regVec);
+    sqlite4VdbeAddOp3(v, OP_MakeRecord, regRowid, 2, regRec);
+    sqlite4VdbeAddOp3(v, OP_Insert, iEph, regRec, regRowid);
+    sqlite4VdbeAddOp2(v, OP_Next, iTab, addr1+1);
+    sqlite4VdbeJumpHere(v, addr1);
+    sqlite4VdbeAddOp1(v, OP_Close, iTab);
+
     sqlite4VdbeAddOp3(v, OP_OpenVectorIdx, iIdx, pIdx->tnum, iDb);
     sqlite4VdbeChangeP4(v, -1, (char *)pVecKey, P4_KEYINFO_HANDOFF);
     sqlite4VdbeChangeP5(v, bCreate ? 0 : OPFLAG_FORDELETE);
-  }else
+
+    addr1 = sqlite4VdbeAddOp2(v, OP_Rewind, iEph, 0);
+    sqlite4VdbeAddOp3(v, OP_Column, iEph, 0, regRowid);
+    sqlite4VdbeAddOp3(v, OP_Column, iEph, 1, regVec);
+    sqlite4VdbeAddOp3(v, OP_Insert, iIdx, regVec, regRowid);
+    sqlite4VdbeAddOp2(v, OP_Next, iEph, addr1+1);
+    sqlite4VdbeJumpHere(v, addr1);
+
+    sqlite4VdbeAddOp1(v, OP_Close, iEph);
+    sqlite4VdbeAddOp1(v, OP_Close, iIdx);
+    sqlite4ReleaseTempReg(pParse, regRec);
+    sqlite4ReleaseTempRange(pParse, regPair, 2);
+    return;
+  }
 #endif
   {
     sqlite4OpenIndex(pParse, iIdx, iDb, pIdx, OP_OpenWrite);

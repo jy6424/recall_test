@@ -664,7 +664,7 @@ static int btreeCursorLoadKey(BtreeCursor *pCsr){
   return rc;
 }
 
-static int btreeCursorPtr(u8 *aData, int nData, int iCell){
+static Pgno btreeCursorPtr(u8 *aData, int nData, int iCell){
   int nCell;
 
   nCell = pageGetNRec(aData, nData);
@@ -878,7 +878,7 @@ static int btreeCursorRestore(
       int nSeek;
       int iTopicSeek;
       int iPg = 0;
-      int iLoad = pSeg->iRoot;
+      Pgno iLoad = pSeg->iRoot;
       Page *pPg = pCsr->aPg[nDepth-1].pPage;
  
       if( pageObjGetNRec(pPg)==0 ){
@@ -1775,7 +1775,7 @@ static int seekInBtree(
 ){
   int i = 0;
   int rc;
-  int iPg;
+  Pgno iPg;
   Page *pPg = 0;
   Blob blob = {0, 0, 0};
 
