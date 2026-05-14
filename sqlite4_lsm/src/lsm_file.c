@@ -1720,8 +1720,8 @@ static int fsFreeBlock(
   int iBlk                        /* Block number of block to free */
 ){
   int rc = LSM_OK;                /* Return code */
-  int iFirst;                     /* First page on block iBlk */
-  int iLast;                      /* Last page on block iBlk */
+  Pgno iFirst;                    /* First page on block iBlk */
+  Pgno iLast;                     /* Last page on block iBlk */
   Level *pLevel;                  /* Used to iterate through levels */
 
   int iIn;                        /* Used to iterate through append points */
@@ -2086,10 +2086,10 @@ int lsmFsSortedAppend(
   int rc = LSM_OK;
   Page *pPg = 0;
   *ppOut = 0;
-  int iApp = 0;
-  int iNext = 0;
+  Pgno iApp = 0;
+  Pgno iNext = 0;
   Segment *p = &pLvl->lhs;
-  int iPrev = p->iLastPg;
+  Pgno iPrev = p->iLastPg;
 
   assert( p->pRedirect==0 );
 
@@ -2114,10 +2114,10 @@ int lsmFsSortedAppend(
     if( iPrev==0 ){
       iApp = findAppendPoint(pFS, pLvl);
     }else if( fsIsLast(pFS, iPrev) ){
-      int iNext;
-      rc = fsBlockNext(pFS, 0, fsPageToBlock(pFS, iPrev), &iNext);
+      int iNextBlk;
+      rc = fsBlockNext(pFS, 0, fsPageToBlock(pFS, iPrev), &iNextBlk);
       if( rc!=LSM_OK ) return rc;
-      iApp = fsFirstPageOnBlock(pFS, iNext);
+      iApp = fsFirstPageOnBlock(pFS, iNextBlk);
     }else{
       iApp = iPrev + 1;
     }

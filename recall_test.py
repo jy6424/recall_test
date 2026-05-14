@@ -480,15 +480,41 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     insert_log = os.path.join(io_log_dir, f"{label}_insert_io.csv") if io_log_dir else None
     insert_mon = DiskStatsMonitor(DISK_DEVICE, log_path=insert_log).start()
     t0 = time.time()
-    insert_sql_run = with_sqlite3_synchronous(
-        "\n".join(insert_lines),
-        is_sqlite3=is_sqlite3,
-        sqlite3_synchronous=sqlite3_synchronous,
-    )
+    insert_body_sql = "\n".join(insert_lines)
+    if is_sqlite3 and sqlite3_synchronous is not None:
+        insert_sql_run = (
+            f"PRAGMA synchronous={sqlite3_synchronous};\n"
+            ".print __INSERT_SYNC_BEGIN__\n"
+            "PRAGMA synchronous;\n"
+            ".print __INSERT_SYNC_BEGIN_END__\n"
+            f"{insert_body_sql}\n"
+            ".print __INSERT_SYNC_FINAL__\n"
+            "PRAGMA synchronous;\n"
+            ".print __INSERT_SYNC_FINAL_END__\n"
+        )
+    else:
+        insert_sql_run = with_sqlite3_synchronous(
+            insert_body_sql,
+            is_sqlite3=is_sqlite3,
+            sqlite3_synchronous=sqlite3_synchronous,
+        )
     insert_sql_run = with_lsm_safety(insert_sql_run, is_sqlite3=is_sqlite3, lsm_safety=lsm_safety)
     ins_out, ins_err, ins_time = run_shell(shell, db_target, insert_sql_run, env=child_env)
     t_insert = time.time() - t0
     result["insert_disk_io"] = insert_mon.stop()
+
+    if is_sqlite3 and sqlite3_synchronous is not None:
+        sync_lines = ins_out.splitlines()
+
+        def value_after_marker(marker):
+            for i, line in enumerate(sync_lines[:-1]):
+                if line.strip() == marker:
+                    return sync_lines[i + 1].strip()
+            return "?"
+
+        sync_begin = value_after_marker("__INSERT_SYNC_BEGIN__")
+        sync_final = value_after_marker("__INSERT_SYNC_FINAL__")
+        print(f"        SQLite3 synchronous check: begin={sync_begin}, final={sync_final}")
 
     # Check for silent SQL errors (shell continues past errors but sets gHasError)
     err_lines = [l for l in ins_err.splitlines() if l.startswith("Error:")]
