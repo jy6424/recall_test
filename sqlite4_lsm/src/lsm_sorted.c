@@ -758,7 +758,7 @@ static int btreeCursorFirst(BtreeCursor *pCsr){
 
   Page *pPg = 0;
   FileSystem *pFS = pCsr->pFS;
-  int iPg = pCsr->pSeg->iRoot;
+  Pgno iPg = pCsr->pSeg->iRoot;
 
   do {
     rc = lsmFsDbPageGet(pFS, pCsr->pSeg, iPg, &pPg);
@@ -1635,7 +1635,7 @@ static int segmentPtrSeek(
   int iTopic,                     /* Key topic to seek to */
   void *pKey, int nKey,           /* Key to seek to */
   int eSeek,                      /* Search bias - see above */
-  int *piPtr,                     /* OUT: FC pointer */
+  Pgno *piPtr,                    /* OUT: FC pointer */
   int *pbStop
 ){
   int (*xCmp)(void *, int, void *, int) = pCsr->pDb->xCmp;
@@ -1853,12 +1853,12 @@ static int seekInSegment(
   SegmentPtr *pPtr,
   int iTopic,
   void *pKey, int nKey,
-  int iPg,                        /* Page to search */
+  Pgno iPg,                       /* Page to search */
   int eSeek,                      /* Search bias - see above */
-  int *piPtr,                     /* OUT: FC pointer */
+  Pgno *piPtr,                    /* OUT: FC pointer */
   int *pbStop                     /* OUT: Stop search flag */
 ){
-  int iPtr = iPg;
+  Pgno iPtr = iPg;
   int rc = LSM_OK;
 
   if( pPtr->pSeg->iRoot ){
@@ -1906,7 +1906,7 @@ static int seekInLevel(
 ){
   Level *pLvl = aPtr[0].pLevel;   /* Level to seek within */
   int rc = LSM_OK;                /* Return code */
-  int iOut = 0;                   /* Pointer to return to caller */
+  Pgno iOut = 0;                  /* Pointer to return to caller */
   int res = -1;                   /* Result of xCmp(pKey, split) */
   int nRhs = pLvl->nRight;        /* Number of right-hand-side segments */
   int bStop = 0;
@@ -1924,7 +1924,7 @@ static int seekInLevel(
   ** is not a composite level and there is no split-key). Search the 
   ** left-hand-side of the level in this case.  */
   if( res<0 ){
-    int iPtr = 0;
+    Pgno iPtr = 0;
     if( nRhs==0 ) iPtr = *piPgno;
 
     rc = seekInSegment(
@@ -1937,7 +1937,7 @@ static int seekInLevel(
   
   if( res>=0 ){
     int bHit = 0;                 /* True if at least one rhs is not EOF */
-    int iPtr = *piPgno;
+    Pgno iPtr = *piPgno;
     int i;
     for(i=1; rc==LSM_OK && i<=nRhs && bStop==0; i++){
       SegmentPtr *pPtr = &aPtr[i];
@@ -3467,7 +3467,7 @@ static int mergeWorkerLoadHierarchy(MergeWorker *pMW){
     lsm_env *pEnv = pMW->pDb->pEnv;
     Page **apHier = 0;
     int nHier = 0;
-    int iPg = pSeg->iRoot;
+    Pgno iPg = pSeg->iRoot;
 
     do {
       Page *pPg = 0;
@@ -3612,9 +3612,9 @@ static int mergeWorkerBtreeWrite(
       assert( lsmFsPageWritable(pOld) );
       aData = fsPageData(pOld, &nData);
       if( eType==0 ){
-        nByte = 2 + 1 + lsmVarintLen32(iPtr) + lsmVarintLen32(iKeyPg);
+        nByte = 2 + 1 + lsmVarintLen64(iPtr) + lsmVarintLen64(iKeyPg);
       }else{
-        nByte = 2 + 1 + lsmVarintLen32(iPtr) + lsmVarintLen32(nKey) + nKey;
+        nByte = 2 + 1 + lsmVarintLen64(iPtr) + lsmVarintLen32(nKey) + nKey;
       }
       nRec = pageGetNRec(aData, nData);
       nFree = SEGMENT_EOF(nData, nRec) - mergeWorkerPageOffset(aData, nData);
@@ -3659,11 +3659,11 @@ static int mergeWorkerBtreeWrite(
   lsmPutU16(&aData[SEGMENT_NRECORD_OFFSET(nData)], nRec+1);
   if( eType==0 ){
     aData[iOff++] = 0x00;
-    iOff += lsmVarintPut32(&aData[iOff], iPtr);
-    iOff += lsmVarintPut32(&aData[iOff], iKeyPg);
+    iOff += lsmVarintPut64(&aData[iOff], iPtr);
+    iOff += lsmVarintPut64(&aData[iOff], iKeyPg);
   }else{
     aData[iOff++] = eType;
-    iOff += lsmVarintPut32(&aData[iOff], iPtr);
+    iOff += lsmVarintPut64(&aData[iOff], iPtr);
     iOff += lsmVarintPut32(&aData[iOff], nKey);
     memcpy(&aData[iOff], pKey, nKey);
   }
@@ -3859,7 +3859,7 @@ static int mergeWorkerNextPage(
 static int mergeWorkerData(
   MergeWorker *pMW,               /* Merge worker object */
   int bSep,                       /* True to write to separators run */
-  int iFPtr,                      /* Footer ptr for new pages */
+  Pgno iFPtr,                     /* Footer ptr for new pages */
   u8 *aWrite,                     /* Write data from this buffer */
   int nWrite                      /* Size of aWrite[] in bytes */
 ){
@@ -3903,7 +3903,7 @@ static int mergeWorkerData(
 static int mergeWorkerFirstPage(MergeWorker *pMW){
   int rc = LSM_OK;                /* Return code */
   Page *pPg = 0;                  /* First page of run pSeg */
-  int iFPtr = 0;                  /* Pointer value read from footer of pPg */
+  Pgno iFPtr = 0;                 /* Pointer value read from footer of pPg */
   MultiCursor *pCsr = pMW->pCsr;
 
   assert( pMW->pPage==0 );
@@ -3938,7 +3938,7 @@ static int mergeWorkerWrite(
   int eType,                      /* One of SORTED_SEPARATOR, WRITE or DELETE */
   void *pKey, int nKey,           /* Key value */
   void *pVal, int nVal,           /* Value value */
-  int iPtr                        /* Absolute value of page pointer, or 0 */
+  Pgno iPtr                       /* Absolute value of page pointer, or 0 */
 ){
   int rc = LSM_OK;                /* Return code */
   Merge *pMerge;                  /* Persistent part of level merge state */
@@ -3947,8 +3947,8 @@ static int mergeWorkerWrite(
   u8 *aData;                      /* Data buffer for page pWriter->pPage */
   int nData;                      /* Size of buffer aData[] in bytes */
   int nRec;                       /* Number of records on page pPg */
-  int iFPtr;                      /* Value of pointer in footer of pPg */
-  int iRPtr = 0;                  /* Value of pointer written into record */
+  Pgno iFPtr;                     /* Value of pointer in footer of pPg */
+  Pgno iRPtr = 0;                 /* Value of pointer written into record */
   int iOff;                       /* Current write offset within page pPg */
   Segment *pSeg;                  /* Segment being written */
   int flags = 0;                  /* If != 0, flags value for page footer */
@@ -3984,7 +3984,7 @@ static int mergeWorkerWrite(
   **     4) Value size - 1 varint (only if LSM_INSERT flag is set)
   */
   if( rc==LSM_OK ){
-    nHdr = 1 + lsmVarintLen32(iRPtr) + lsmVarintLen32(nKey);
+    nHdr = 1 + lsmVarintLen64(iRPtr) + lsmVarintLen32(nKey);
     if( rtIsWrite(eType) ) nHdr += lsmVarintLen32(nVal);
 
     /* If the entire header will not fit on page pPg, or if page pPg is 
@@ -4031,7 +4031,7 @@ static int mergeWorkerWrite(
 
     /* Write the entry header into the current page. */
     aData[iOff++] = eType;                                               /* 1 */
-    iOff += lsmVarintPut32(&aData[iOff], iRPtr);                         /* 2 */
+    iOff += lsmVarintPut64(&aData[iOff], iRPtr);                         /* 2 */
     iOff += lsmVarintPut32(&aData[iOff], nKey);                          /* 3 */
     if( rtIsWrite(eType) ) iOff += lsmVarintPut32(&aData[iOff], nVal);   /* 4 */
     pMerge->iOutputOff = iOff;

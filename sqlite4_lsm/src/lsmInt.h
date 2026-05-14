@@ -846,6 +846,7 @@ int lsmVarintPut64(u8 *aData, i64 iVal);
 int lsmVarintGet64(const u8 *aData, i64 *piVal);
 
 int lsmVarintLen32(int);
+int lsmVarintLen64(i64);
 int lsmVarintSize(u8 c);
 
 /* 

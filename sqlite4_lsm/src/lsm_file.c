@@ -539,8 +539,8 @@ static int fsMmapPage(FileSystem *pFS, Pgno iReal){
 ** Given that there are currently nHash slots in the hash table, return 
 ** the hash key for file iFile, page iPg.
 */
-static int fsHashKey(int nHash, int iPg){
-  return (iPg % nHash);
+static int fsHashKey(int nHash, Pgno iPg){
+  return (int)(iPg % nHash);
 }
 
 /*
