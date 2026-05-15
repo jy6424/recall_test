@@ -3010,9 +3010,9 @@ int lsmInfoArrayStructure(
     }else{
       lsmStringAppendf(&str, "%d", pArray->iFirst);
       while( iBlk!=iLastBlk ){
-        lsmStringAppendf(&str, " %d", fsLastPageOnBlock(pFS, iBlk));
+        lsmStringAppendf(&str, " %lld", fsLastPageOnBlock(pFS, iBlk));
         fsBlockNext(pFS, pArray, iBlk, &iBlk);
-        lsmStringAppendf(&str, " %d", fsFirstPageOnBlock(pFS, iBlk));
+        lsmStringAppendf(&str, " %lld", fsFirstPageOnBlock(pFS, iBlk));
       }
       lsmStringAppendf(&str, " %d", pArray->iLastPg);
     }
