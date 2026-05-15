@@ -326,6 +326,22 @@ def with_sqlite4_synchronous(sql_text, is_sqlite3=False, sqlite4_synchronous=Non
     return f"PRAGMA lsm_safety={lsm_safety};\n{sql_text}"
 
 
+def value_after_marker(lines, marker):
+    for i, line in enumerate(lines[:-1]):
+        if line.strip() != marker:
+            continue
+        for value in lines[i + 1:]:
+            value = value.strip()
+            if not value or value.startswith("__INSERT_SYNC_"):
+                continue
+            if value in ("synchronous", "lsm_safety"):
+                continue
+            if re.fullmatch(r"\d+", value):
+                return value
+        return "?"
+    return "?"
+
+
 def parse_output_to_results(output, k):
     """Parse shell output into list of sets of IDs, chunked by k."""
     id_lines = []
@@ -517,13 +533,13 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         lsm_safety = sqlite4_synchronous_lsm_safety(sqlite4_synchronous)
         insert_sql_run = (
             f"PRAGMA lsm_safety={lsm_safety};\n"
-            ".print __INSERT_SYNC_BEGIN__\n"
+            "SELECT '__INSERT_SYNC_BEGIN__';\n"
             "PRAGMA lsm_safety;\n"
-            ".print __INSERT_SYNC_BEGIN_END__\n"
+            "SELECT '__INSERT_SYNC_BEGIN_END__';\n"
             f"{insert_body_sql}\n"
-            ".print __INSERT_SYNC_FINAL__\n"
+            "SELECT '__INSERT_SYNC_FINAL__';\n"
             "PRAGMA lsm_safety;\n"
-            ".print __INSERT_SYNC_FINAL_END__\n"
+            "SELECT '__INSERT_SYNC_FINAL_END__';\n"
         )
     else:
         insert_sql_run = with_sqlite3_synchronous(
@@ -542,27 +558,13 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
 
     if is_sqlite3 and sqlite3_synchronous is not None:
         sync_lines = ins_out.splitlines()
-
-        def value_after_marker(marker):
-            for i, line in enumerate(sync_lines[:-1]):
-                if line.strip() == marker:
-                    return sync_lines[i + 1].strip()
-            return "?"
-
-        sync_begin = value_after_marker("__INSERT_SYNC_BEGIN__")
-        sync_final = value_after_marker("__INSERT_SYNC_FINAL__")
+        sync_begin = value_after_marker(sync_lines, "__INSERT_SYNC_BEGIN__")
+        sync_final = value_after_marker(sync_lines, "__INSERT_SYNC_FINAL__")
         print(f"        SQLite3 synchronous check: begin={sync_begin}, final={sync_final}")
     elif not is_sqlite3 and sqlite4_synchronous is not None:
         sync_lines = ins_out.splitlines()
-
-        def value_after_marker(marker):
-            for i, line in enumerate(sync_lines[:-1]):
-                if line.strip() == marker:
-                    return sync_lines[i + 1].strip()
-            return "?"
-
-        sync_begin = value_after_marker("__INSERT_SYNC_BEGIN__")
-        sync_final = value_after_marker("__INSERT_SYNC_FINAL__")
+        sync_begin = value_after_marker(sync_lines, "__INSERT_SYNC_BEGIN__")
+        sync_final = value_after_marker(sync_lines, "__INSERT_SYNC_FINAL__")
         print(f"        SQLite4 synchronous check: begin={sync_begin}, final={sync_final}")
 
     # Check for silent SQL errors (shell continues past errors but sets gHasError)
