@@ -325,19 +325,27 @@ def cleanup_db(db_path, is_sqlite3=False):
 
 
 def parse_insert_sql(sql_path):
-    """Split insert SQL into schema lines and INSERT statements."""
+    """Split insert SQL into (schema, index_lines, inserts).
+    schema      = CREATE TABLE / PRAGMA
+    index_lines = CREATE INDEX (run before any data)
+    inserts     = INSERT INTO statements
+    """
     schema = []
+    index_lines = []
     inserts = []
     with open(sql_path) as f:
         for line in f:
             stripped = line.strip()
             if not stripped:
                 continue
-            if stripped.upper().startswith("INSERT"):
+            upper = stripped.upper()
+            if upper.startswith("INSERT"):
                 inserts.append(stripped)
+            elif upper.startswith("CREATE INDEX") or upper.startswith("CREATE UNIQUE INDEX"):
+                index_lines.append(stripped)
             else:
                 schema.append(stripped)
-    return schema, inserts
+    return schema, index_lines, inserts
 
 
 def build_schema_sql(schema_lines, page_size_kb):
@@ -420,6 +428,8 @@ def compute_groundtruth_l2(data_vecs, query_vecs, k):
 DISTANCE_TYPES = {
     "glove": "cosine",
     "sift": "l2",
+    "coco" : "cosine",
+    "cohere": "cosine",
 }
 
 
@@ -456,7 +466,8 @@ def compute_recall(ann_results, bf_results, k):
 def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
                     all_ids, all_vecs, query_vecs, k, db_dir,
                     distance_type="cosine", is_sqlite3=False, do_compact=False,
-                    do_drop_cache=False, io_log_dir=None, disk_device=DISK_DEVICE,
+                    do_drop_cache=False, internal_io_timing=True,
+                    io_log_dir=None, disk_device=DISK_DEVICE,
                     page_size_kb=None):
     """Run incremental insert experiment for one config."""
 
@@ -464,10 +475,10 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
     db_target = build_db_target(db_path, is_sqlite3=is_sqlite3, page_size_kb=page_size_kb)
     cleanup_db(db_path, is_sqlite3)
     child_env = os.environ.copy()
-    child_env["DISKANN_IO_TIMING"] = "1"
+    child_env["DISKANN_IO_TIMING"] = "1" if internal_io_timing else "0"
 
     # Parse files
-    schema, inserts = parse_insert_sql(insert_sql_path)
+    schema, index_lines, inserts = parse_insert_sql(insert_sql_path)
     ann_queries, _ = parse_query_sql(query_sql_path)
     n_total = len(inserts)
     n_queries = len(ann_queries)
@@ -490,13 +501,14 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
     n_batch = n_remaining // 5
     batches = [n_first] + [n_batch] * 4 + [n_remaining - n_batch * 4]
 
-    # Create schema (not timed)
+    # Create schema and indexes before loading data (not timed).
+    setup_lines = schema + index_lines
     if not is_sqlite3 and page_size_kb is not None:
-        schema_sql = build_schema_sql(schema, page_size_kb)
+        schema_sql = build_schema_sql(setup_lines, page_size_kb)
     else:
-        schema_sql = "\n".join(schema)
+        schema_sql = "\n".join(setup_lines)
     run_shell(shell, db_target, schema_sql, env=child_env)
-    print(f"  Schema created")
+    print(f"  Schema/index created")
 
     # Build ANN query string
     ann_sql = "\n".join(ann_queries)
@@ -559,6 +571,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
         # Compact (sqlite4 only, if enabled)
         t_compact = 0.0
         compact_io = None
+        compact_time_stats = {}
         if need_compact:
             drop_caches()
             compact_log = None
@@ -601,9 +614,10 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             if len(q_err_lines) > 5:
                 print(f"           ... ({len(q_err_lines)-5} more)")
         ann_results = parse_output_to_results(ann_out, k)
-        ann_qps = n_queries / t_ann if t_ann > 0 else 0
+        q = len(ann_results)
+        ann_qps = q / t_ann if t_ann > 0 else 0
         q_stats = parse_diskann_stats(q_err)
-        print(f"  ANN:     {t_ann:.2f}s ({ann_qps:.0f} q/s)")
+        print(f"  ANN:     {t_ann:.2f}s ({ann_qps:.0f} q/s), {q} queries returned")
         if q_time_stats:
             print(
                 f"          time: real={q_time_stats.get('real_s', 0):.2f}s  "
@@ -645,6 +659,8 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             "pct": pct,
             "insert_s": round(t_insert, 2),
             "compact_s": round(t_compact, 2),
+            "query_s": round(t_ann, 2),
+            "queries": q,
             "ann_qps": round(ann_qps, 1),
             "gt_s": round(t_gt, 2),
             "recall": round(recall, 4),
@@ -654,7 +670,7 @@ def run_incremental(label, shell, compact_bin, insert_sql_path, query_sql_path,
             "query_disk_io": query_io,
             "insert_time_stats": ins_time_stats,
             "insert_stats": ins_stats,
-            "compact_time_stats": compact_time_stats if need_compact else {},
+            "compact_time_stats": compact_time_stats,
             "query_time_stats": q_time_stats,
             "query_stats": q_stats,
         })
@@ -682,6 +698,8 @@ def main():
                              "1: skip compact_db (autowork=1 handles it)")
     parser.add_argument("--drop-cache", action="store_true",
                         help="Drop OS page cache before each timed phase (requires sudo)")
+    parser.add_argument("--internal-io-timing", type=int, default=1, choices=[0, 1],
+                        help="0: disable per-op internal read/write I/O timing, 1: enable it")
     parser.add_argument("--io-log-dir", type=str, default="./io_logs",
                         help="Directory to store per-batch disk I/O CSV logs")
     parser.add_argument("--disk-device", type=str, default=DISK_DEVICE,
@@ -735,6 +753,7 @@ def main():
     print(f"Configs:  {', '.join(l for l, _, _, _, _ in configs)}")
     auto_compact = bool(args.auto_compact)
     print(f"Auto-compact: {'ON (no compact_db)' if auto_compact else 'OFF (use compact_db)'}")
+    print(f"Internal I/O timing: {'ON' if args.internal_io_timing else 'OFF'}")
     print(f"Disk device: {args.disk_device}")
     print(f"I/O log dir: {args.io_log_dir}")
     print(f"DB dir:   {args.db_dir}")
@@ -767,7 +786,9 @@ def main():
                 all_ids, all_vecs, query_vecs,
                 args.k, args.db_dir, distance_type=dist_type,
                 is_sqlite3=is_s3, do_compact=not auto_compact,
-                do_drop_cache=args.drop_cache, io_log_dir=args.io_log_dir,
+                do_drop_cache=args.drop_cache,
+                internal_io_timing=bool(args.internal_io_timing),
+                io_log_dir=args.io_log_dir,
                 disk_device=args.disk_device, page_size_kb=ps_kb
             )
             all_results[run_label] = results
@@ -777,25 +798,58 @@ def main():
             cleanup_db(db_path, is_sqlite3=is_s3)
             print(f"  Cleaned up {db_path}")
 
-    # Summary per config
+    # Summary per config, matching recall_test.py's insert/query breakdown.
     for run_label, results in all_results.items():
-        print(f"\n{'='*90}")
+        ins_hdr = (
+            f"{'Overall':>8} {'Table':>8} {'Build':>8} {'ReadIO':>8} "
+            f"{'WriteIO':>8} {'Dist':>8} {'LSM':>8}"
+        )
+        ins_sub = f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8}"
+        q_hdr = (
+            f"{'Overall':>8} {'Graph':>8} {'ReadIO':>8} {'Dist':>8} "
+            f"{'Result':>8} {'Q/s':>8} {'Recall':>8}"
+        )
+        q_sub = f"{'(s)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} {'':>8} {'@k':>8}"
+        hdr = (f"{'Batch':>6} {'Rows':>8} {'Total':>8} {'%':>5} "
+               f"|{ins_hdr} |{'Compact':>9} |{q_hdr} | {'GT':>8} {'Size':>8}")
+        sub = (f"{'':>6} {'added':>8} {'rows':>8} {'':>5} "
+               f"|{ins_sub} |{'(s)':>9} |{q_sub} | {'(s)':>8} {'(MB)':>8}")
+        w = len(hdr)
+        print(f"\n{'='*w}")
         print(f"  {run_label} — Incremental Results (k={args.k})")
-        print(f"{'='*90}")
-        print(f"{'Batch':>6} {'Rows':>8} {'Total':>8} {'%':>5} "
-              f"{'Insert':>8} {'Compact':>8} {'ANN':>8} {'GT':>8} "
-              f"{'Recall':>8} {'DB':>8}")
-        print(f"{'':>6} {'added':>8} {'rows':>8} {'':>5} "
-              f"{'(s)':>8} {'(s)':>8} {'(q/s)':>8} {'(s)':>8} "
-              f"{'@k':>8} {'(MB)':>8}")
-        print(f"{'-'*90}")
+        print(f"{'='*w}")
+        ins_w = len(ins_hdr) + 1
+        q_w = len(q_hdr) + 1
+        print(f"{'':>31} |{'--- Insert ---':^{ins_w}} |{'Compact':^11}|{'--- Query ---':^{q_w}} |")
+        print(hdr)
+        print(sub)
+        print(f"{'-'*w}")
         for r in results:
-            compact_str = f"{r['compact_s']:>8.1f}" if r['compact_s'] > 0 else f"{'---':>8}"
+            ist = r.get('insert_stats', {})
+            table_s = ist.get('table_insert_ms', 0) / 1000
+            build_s = ist.get('build_total_ms', 0) / 1000
+            read_s = ist.get('build_read_ms', 0) / 1000
+            write_s = ist.get('build_write_ms', 0) / 1000
+            dist_s = ist.get('build_dist_ms', 0) / 1000
+            lsm_s = ist.get('build_lsm_ms', 0) / 1000
+            qst = r.get('query_stats', {})
+            compact_str = f"{r['compact_s']:>9.1f}" if r['compact_s'] > 0 else f"{'---':>9}"
+            ins_vals = (
+                f"{r['insert_s']:>8.1f} "
+                f"{table_s:>8.1f} {build_s:>8.1f} {read_s:>8.1f} "
+                f"{write_s:>8.1f} {dist_s:>8.1f} {lsm_s:>8.1f}"
+            )
+            q_vals = (
+                f"{r['query_s']:>8.1f} "
+                f"{qst.get('graph_ms', 0):>8.1f} "
+                f"{qst.get('query_read_ms', 0):>8.1f} "
+                f"{qst.get('query_dist_ms', 0):>8.1f} "
+                f"{qst.get('result_ms', 0):>8.1f} "
+                f"{r['ann_qps']:>8.0f} {r['recall']:>8.4f}"
+            )
             print(f"{r['batch']:>6} {r['rows_added']:>8} {r['total_rows']:>8} "
-                  f"{r['pct']:>4}% {r['insert_s']:>8.1f} "
-                  f"{compact_str} {r['ann_qps']:>8.0f} {r['gt_s']:>8.1f} "
-                  f"{r['recall']:>8.4f} {r['db_mb']:>8.1f}")
-        print(f"{'='*90}")
+                  f"{r['pct']:>4}% |{ins_vals} |{compact_str} |{q_vals} | {r['gt_s']:>8.1f} {r['db_mb']:>8.1f}")
+        print(f"{'='*w}")
 
 
 if __name__ == "__main__":
