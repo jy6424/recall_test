@@ -125,11 +125,12 @@ int main(int argc, char **argv) {
         if (*p == ';') {
             run_sql(db, accum);
             accum[0] = '\0';
+            if (gHasError && !interactive) break;
         }
     }
 
     /* Run any remaining input */
-    if (accum[0]) run_sql(db, accum);
+    if (accum[0] && !gHasError) run_sql(db, accum);
 
     sqlite4_close(db, 0);
     return gHasError ? 1 : 0;
