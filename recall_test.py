@@ -233,6 +233,51 @@ def run_shell(shell, db, sql_input, env=None):
     return proc.stdout, stderr_text, time_stats
 
 
+def sql_error_lines(stderr_text):
+    return [l for l in stderr_text.splitlines() if l.startswith("Error:")]
+
+
+def print_sql_errors(phase, err_lines):
+    print(f"        !! {len(err_lines)} SQL errors during {phase}:")
+    for l in err_lines[:5]:
+        print(f"           {l}")
+    if len(err_lines) > 5:
+        print(f"           ... ({len(err_lines)-5} more)")
+
+
+def parse_count_outputs(stdout_text):
+    counts = []
+    for line in stdout_text.splitlines():
+        s = line.strip()
+        if re.fullmatch(r"-?\d+", s):
+            counts.append(int(s))
+    return counts
+
+
+def check_vector_counts(shell, db_target, env=None):
+    sql = (
+        "SELECT COUNT(*) FROM x;\n"
+        "SELECT COUNT(*) FROM x_idx_shadow;\n"
+    )
+    out, err, _ = run_shell(shell, db_target, sql, env=env)
+    err_lines = sql_error_lines(err)
+    if err_lines:
+        print_sql_errors("vector count check", err_lines)
+        raise RuntimeError("vector count check failed")
+
+    counts = parse_count_outputs(out)
+    if len(counts) < 2:
+        raise RuntimeError(f"vector count check did not return two counts: {out!r}")
+
+    table_count, shadow_count = counts[0], counts[1]
+    if table_count != shadow_count:
+        raise RuntimeError(
+            "vector index/table row-count mismatch: "
+            f"x={table_count}, x_idx_shadow={shadow_count}"
+        )
+    return table_count, shadow_count
+
+
 def run_compact(compact_bin, db, env=None, lsm_compression="none"):
     cmd = [compact_bin, db]
     if lsm_compression and lsm_compression != "none":
@@ -510,7 +555,11 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         is_sqlite3=is_sqlite3,
         sqlite4_synchronous=sqlite4_synchronous,
     )
-    run_shell(shell, db_target, schema_sql, env=child_env)  # ignore return tuple
+    _, schema_err, _ = run_shell(shell, db_target, schema_sql, env=child_env)
+    schema_err_lines = sql_error_lines(schema_err)
+    if schema_err_lines:
+        print_sql_errors("schema", schema_err_lines)
+        raise RuntimeError(f"schema phase had {len(schema_err_lines)} SQL errors")
 
     # Insert (timed — equivalent to ann-benchmarks fit())
     drop_caches(do_drop_cache)
@@ -568,14 +617,14 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         print(f"        SQLite4 synchronous check: begin={sync_begin}, final={sync_final}")
 
     # Check for silent SQL errors (shell continues past errors but sets gHasError)
-    err_lines = [l for l in ins_err.splitlines() if l.startswith("Error:")]
+    err_lines = sql_error_lines(ins_err)
     if err_lines:
-        print(f"        !! {len(err_lines)} SQL errors during insert:")
-        for l in err_lines[:5]:
-            print(f"           {l}")
-        if len(err_lines) > 5:
-            print(f"           ... ({len(err_lines)-5} more)")
+        print_sql_errors("insert", err_lines)
         raise RuntimeError(f"insert phase had {len(err_lines)} SQL errors")
+
+    table_count, shadow_count = check_vector_counts(shell, db_target, env=child_env)
+    result["row_count"] = table_count
+    result["shadow_count"] = shadow_count
 
     size_before = file_size_mb(db_path)
     result["insert_time_s"] = round(t_insert, 2)
