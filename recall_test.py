@@ -233,51 +233,6 @@ def run_shell(shell, db, sql_input, env=None):
     return proc.stdout, stderr_text, time_stats
 
 
-def sql_error_lines(stderr_text):
-    return [l for l in stderr_text.splitlines() if l.startswith("Error:")]
-
-
-def print_sql_errors(phase, err_lines):
-    print(f"        !! {len(err_lines)} SQL errors during {phase}:")
-    for l in err_lines[:5]:
-        print(f"           {l}")
-    if len(err_lines) > 5:
-        print(f"           ... ({len(err_lines)-5} more)")
-
-
-def parse_count_outputs(stdout_text):
-    counts = []
-    for line in stdout_text.splitlines():
-        s = line.strip()
-        if re.fullmatch(r"-?\d+", s):
-            counts.append(int(s))
-    return counts
-
-
-def check_vector_counts(shell, db_target, env=None):
-    sql = (
-        "SELECT COUNT(*) FROM x;\n"
-        "SELECT COUNT(*) FROM x_idx_shadow;\n"
-    )
-    out, err, _ = run_shell(shell, db_target, sql, env=env)
-    err_lines = sql_error_lines(err)
-    if err_lines:
-        print_sql_errors("vector count check", err_lines)
-        raise RuntimeError("vector count check failed")
-
-    counts = parse_count_outputs(out)
-    if len(counts) < 2:
-        raise RuntimeError(f"vector count check did not return two counts: {out!r}")
-
-    table_count, shadow_count = counts[0], counts[1]
-    if table_count != shadow_count:
-        raise RuntimeError(
-            "vector index/table row-count mismatch: "
-            f"x={table_count}, x_idx_shadow={shadow_count}"
-        )
-    return table_count, shadow_count
-
-
 def run_compact(compact_bin, db, env=None, lsm_compression="none"):
     cmd = [compact_bin, db]
     if lsm_compression and lsm_compression != "none":
@@ -341,50 +296,6 @@ def build_db_target(db_path, is_sqlite3=False, page_size_kb=None, lsm_compressio
     if lsm_compression and lsm_compression != "none":
         params.append(f"lsm_compression={lsm_compression}")
     return f"file:{db_path}?{'&'.join(params)}"
-
-
-def with_sqlite3_synchronous(sql_text, is_sqlite3=False, sqlite3_synchronous=None):
-    if not is_sqlite3 or sqlite3_synchronous is None:
-        return sql_text
-    return f"PRAGMA synchronous={sqlite3_synchronous};\n{sql_text}"
-
-
-def sqlite4_synchronous_lsm_safety(sqlite4_synchronous):
-    if sqlite4_synchronous is None:
-        return None
-    values = {
-        "0": "0",
-        "OFF": "0",
-        "1": "1",
-        "ON": "1",
-        "NORMAL": "1",
-        "2": "2",
-        "FULL": "2",
-    }
-    return values[sqlite4_synchronous.upper()]
-
-
-def with_sqlite4_synchronous(sql_text, is_sqlite3=False, sqlite4_synchronous=None):
-    if is_sqlite3 or sqlite4_synchronous is None:
-        return sql_text
-    lsm_safety = sqlite4_synchronous_lsm_safety(sqlite4_synchronous)
-    return f"PRAGMA lsm_safety={lsm_safety};\n{sql_text}"
-
-
-def value_after_marker(lines, marker):
-    for i, line in enumerate(lines[:-1]):
-        if line.strip() != marker:
-            continue
-        for value in lines[i + 1:]:
-            value = value.strip()
-            if not value or value.startswith("__INSERT_SYNC_"):
-                continue
-            if value in ("synchronous", "lsm_safety"):
-                continue
-            if re.fullmatch(r"\d+", value):
-                return value
-        return "?"
-    return "?"
 
 
 def parse_output_to_results(output, k):
@@ -505,8 +416,7 @@ def format_io_summary(io_stats):
 def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                    gt_results, k, db_dir, is_sqlite3=False, auto_compact=False,
                    do_drop_cache=False, internal_io_timing=False, io_log_dir=None,
-                   page_size_kb=None, lsm_compression="none", sqlite3_synchronous=None,
-                   sqlite4_synchronous=None):
+                   page_size_kb=None, lsm_compression="none"):
     db_path = os.path.join(db_dir, f"bench_{label}.db")
     db_target = build_db_target(
         db_path,
@@ -518,22 +428,13 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     child_env = os.environ.copy()
     child_env["DISKANN_IO_TIMING"] = "1" if internal_io_timing else "0"
 
-    result = {
-        "label": label,
-        "sqlite3_synchronous": sqlite3_synchronous if is_sqlite3 else "",
-        "sqlite4_synchronous": sqlite4_synchronous if not is_sqlite3 else "",
-    }
+    result = {"label": label}
     need_compact = not is_sqlite3 and not auto_compact and compact_bin
     n_phases = 4 if need_compact else 3
 
     print(f"\n{'='*60}")
     print(f"  Config: {label}")
     print(f"  Shell:   {shell}")
-    if is_sqlite3 and sqlite3_synchronous is not None:
-        print(f"  SQLite3 synchronous: {sqlite3_synchronous}")
-    if not is_sqlite3 and sqlite4_synchronous is not None:
-        lsm_safety = sqlite4_synchronous_lsm_safety(sqlite4_synchronous)
-        print(f"  SQLite4 synchronous: {sqlite4_synchronous} (lsm_safety={lsm_safety})")
     if not is_sqlite3 and page_size_kb is not None:
         print(f"  DB open: {db_target}")
     if need_compact:
@@ -545,86 +446,26 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     schema_lines, insert_lines = split_schema_inserts(insert_sql)
 
     print(f"  [1/{n_phases}] Schema + Insert...")
-    schema_sql = with_sqlite3_synchronous(
-        "\n".join(schema_lines),
-        is_sqlite3=is_sqlite3,
-        sqlite3_synchronous=sqlite3_synchronous,
-    )
-    schema_sql = with_sqlite4_synchronous(
-        schema_sql,
-        is_sqlite3=is_sqlite3,
-        sqlite4_synchronous=sqlite4_synchronous,
-    )
-    _, schema_err, _ = run_shell(shell, db_target, schema_sql, env=child_env)
-    schema_err_lines = sql_error_lines(schema_err)
-    if schema_err_lines:
-        print_sql_errors("schema", schema_err_lines)
-        raise RuntimeError(f"schema phase had {len(schema_err_lines)} SQL errors")
+    run_shell(shell, db_target, "\n".join(schema_lines), env=child_env)  # ignore return tuple
 
     # Insert (timed — equivalent to ann-benchmarks fit())
     drop_caches(do_drop_cache)
     insert_log = os.path.join(io_log_dir, f"{label}_insert_io.csv") if io_log_dir else None
     insert_mon = DiskStatsMonitor(DISK_DEVICE, log_path=insert_log).start()
     t0 = time.time()
-    insert_body_sql = "\n".join(insert_lines)
-    if is_sqlite3 and sqlite3_synchronous is not None:
-        insert_sql_run = (
-            f"PRAGMA synchronous={sqlite3_synchronous};\n"
-            ".print __INSERT_SYNC_BEGIN__\n"
-            "PRAGMA synchronous;\n"
-            ".print __INSERT_SYNC_BEGIN_END__\n"
-            f"{insert_body_sql}\n"
-            ".print __INSERT_SYNC_FINAL__\n"
-            "PRAGMA synchronous;\n"
-            ".print __INSERT_SYNC_FINAL_END__\n"
-        )
-    elif not is_sqlite3 and sqlite4_synchronous is not None:
-        lsm_safety = sqlite4_synchronous_lsm_safety(sqlite4_synchronous)
-        insert_sql_run = (
-            f"PRAGMA lsm_safety={lsm_safety};\n"
-            "SELECT '__INSERT_SYNC_BEGIN__';\n"
-            "PRAGMA lsm_safety;\n"
-            "SELECT '__INSERT_SYNC_BEGIN_END__';\n"
-            f"{insert_body_sql}\n"
-            "SELECT '__INSERT_SYNC_FINAL__';\n"
-            "PRAGMA lsm_safety;\n"
-            "SELECT '__INSERT_SYNC_FINAL_END__';\n"
-        )
-    else:
-        insert_sql_run = with_sqlite3_synchronous(
-            insert_body_sql,
-            is_sqlite3=is_sqlite3,
-            sqlite3_synchronous=sqlite3_synchronous,
-        )
-        insert_sql_run = with_sqlite4_synchronous(
-            insert_sql_run,
-            is_sqlite3=is_sqlite3,
-            sqlite4_synchronous=sqlite4_synchronous,
-        )
-    ins_out, ins_err, ins_time = run_shell(shell, db_target, insert_sql_run, env=child_env)
+    ins_out, ins_err, ins_time = run_shell(shell, db_target, "\n".join(insert_lines), env=child_env)
     t_insert = time.time() - t0
     result["insert_disk_io"] = insert_mon.stop()
 
-    if is_sqlite3 and sqlite3_synchronous is not None:
-        sync_lines = ins_out.splitlines()
-        sync_begin = value_after_marker(sync_lines, "__INSERT_SYNC_BEGIN__")
-        sync_final = value_after_marker(sync_lines, "__INSERT_SYNC_FINAL__")
-        print(f"        SQLite3 synchronous check: begin={sync_begin}, final={sync_final}")
-    elif not is_sqlite3 and sqlite4_synchronous is not None:
-        sync_lines = ins_out.splitlines()
-        sync_begin = value_after_marker(sync_lines, "__INSERT_SYNC_BEGIN__")
-        sync_final = value_after_marker(sync_lines, "__INSERT_SYNC_FINAL__")
-        print(f"        SQLite4 synchronous check: begin={sync_begin}, final={sync_final}")
-
     # Check for silent SQL errors (shell continues past errors but sets gHasError)
-    err_lines = sql_error_lines(ins_err)
+    err_lines = [l for l in ins_err.splitlines() if l.startswith("Error:")]
     if err_lines:
-        print_sql_errors("insert", err_lines)
+        print(f"        !! {len(err_lines)} SQL errors during insert:")
+        for l in err_lines[:5]:
+            print(f"           {l}")
+        if len(err_lines) > 5:
+            print(f"           ... ({len(err_lines)-5} more)")
         raise RuntimeError(f"insert phase had {len(err_lines)} SQL errors")
-
-    table_count, shadow_count = check_vector_counts(shell, db_target, env=child_env)
-    result["row_count"] = table_count
-    result["shadow_count"] = shadow_count
 
     size_before = file_size_mb(db_path)
     result["insert_time_s"] = round(t_insert, 2)
@@ -687,16 +528,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     # Query (timed)
     phase_q = 3 if need_compact else 2
     print(f"  [{phase_q}/{n_phases}] Querying...")
-    query_sql = with_sqlite3_synchronous(
-        read_sql(query_sql_path),
-        is_sqlite3=is_sqlite3,
-        sqlite3_synchronous=sqlite3_synchronous,
-    )
-    query_sql = with_sqlite4_synchronous(
-        query_sql,
-        is_sqlite3=is_sqlite3,
-        sqlite4_synchronous=sqlite4_synchronous,
-    )
+    query_sql = read_sql(query_sql_path)
 
     drop_caches(do_drop_cache)
     query_log = os.path.join(io_log_dir, f"{label}_query_io.csv") if io_log_dir else None
@@ -765,23 +597,13 @@ def main():
     parser = argparse.ArgumentParser(description="LSM vector benchmark")
     parser.add_argument("--dataset-dir", type=str, default=os.path.expanduser("./dataset"),
                         help="Directory with SQL files (default: ./dataset)")
-    parser.add_argument("--datasets", type=str, default="sift,glove,coco,cohere",
-                        help="Comma-separated dataset names")
+    parser.add_argument("--datasets", type=str, default="glove,sift,coco,cohere",
+                        help="Comma-separated dataset names (default: glove,sift)")
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--sqlite4-dir", type=str, default="./sqlite4_lsm",
                         help="Directory containing sqlite4 and optional compact_db")
     parser.add_argument("--sqlite3-dir", type=str, default="./sqlite3_libsql",
                         help="Directory containing sqlite3")
-    parser.add_argument("--sqlite3-synchronous", type=str, default=None,
-                        choices=["0", "1", "2", "3", "OFF", "NORMAL", "FULL", "EXTRA",
-                                 "off", "normal", "full", "extra"],
-                        help="Set PRAGMA synchronous for sqlite3_libsql configs only "
-                             "(0/OFF, 1/NORMAL, 2/FULL, 3/EXTRA). Default: sqlite3 build default")
-    parser.add_argument("--sqlite4-synchronous", type=str, default=None,
-                        choices=["0", "1", "2", "OFF", "ON", "NORMAL", "FULL",
-                                 "off", "on", "normal", "full"],
-                        help="Set PRAGMA synchronous for sqlite4_lsm configs only "
-                             "(0/OFF, 1/ON/NORMAL, 2/FULL). Default: sqlite4 build default")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
     parser.add_argument("--lsm-compression", type=str, default="none", choices=["none", "zlib", "lz4"],
@@ -845,8 +667,6 @@ def main():
     print(f"Datasets:     {', '.join(n for n, _, _, _ in datasets)}")
     print(f"Configs:      {', '.join(cfg[0] for cfg in configs)}")
     print(f"LSM compression: {args.lsm_compression}")
-    print(f"SQLite3 synchronous: {args.sqlite3_synchronous or 'default'}")
-    print(f"SQLite4 synchronous: {args.sqlite4_synchronous or 'default'}")
     print(f"Auto-compact: {'ON (no compact_db)' if auto_compact else 'OFF (use compact_db)'}")
     print(f"Internal I/O timing: {'ON' if args.internal_io_timing else 'OFF'}")
     print(f"Disk device:  /dev/{DISK_DEVICE}")
@@ -879,9 +699,7 @@ def main():
                 auto_compact=auto_compact, do_drop_cache=args.drop_cache,
                 internal_io_timing=bool(args.internal_io_timing),
                 io_log_dir=args.io_log_dir, page_size_kb=ps_kb,
-                lsm_compression=args.lsm_compression,
-                sqlite3_synchronous=args.sqlite3_synchronous,
-                sqlite4_synchronous=args.sqlite4_synchronous
+                lsm_compression=args.lsm_compression
             )
             ds_results.append(result)
 

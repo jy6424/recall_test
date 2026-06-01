@@ -2,3 +2,6 @@ dataset/*
 .DS_Store
 *.log
 *.csv
+*.o
+sqlite4*
+libsqlite4.a
