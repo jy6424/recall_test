@@ -159,10 +159,10 @@ int main(int argc, char **argv){
     lsm_free(pEnv, zInfo);
   }
 
-  /* Phase 1: Merge with nMerge=4 to do bulk merge work */
+  /* Phase 1: Merge with pDb->nMerge to do bulk merge work */
   fprintf(stderr, "Compacting %s (phase 1: merge)\n", argv[1]);
   do {
-    rc = lsm_work(pDb, 4, 4096, &nWritten);
+    rc = lsm_work(pDb, 0, 4096, &nWritten);
     if( rc != 0 ){
       fprintf(stderr, "lsm_work failed: %d\n", rc);
       break;

@@ -311,7 +311,41 @@ def run_compact(compact_bin, db, env=None, lsm_compression="none"):
         env=env,
     )
     stderr_text, time_stats = parse_time_stats(proc.stderr)
+    if proc.returncode != 0:
+        err_lines = [l for l in stderr_text.splitlines() if l.strip()]
+        err_msg = "\n".join(err_lines[-10:]) if err_lines else stderr_text[-500:]
+        raise RuntimeError(f"compact_db failed (rc={proc.returncode}): {err_msg}")
     return stderr_text, time_stats
+
+
+def build_compact_binary(lsm_dir):
+    compact_bin = os.path.join(lsm_dir, "compact_db")
+    compact_src = os.path.join(lsm_dir, "compact_db.c")
+    libsqlite4 = os.path.join(lsm_dir, "libsqlite4.a")
+
+    if os.path.isfile(compact_bin) and os.access(compact_bin, os.X_OK):
+        return compact_bin
+    if not os.path.isfile(compact_src):
+        print(f"Warning: compact_db.c missing, cannot build {compact_bin}")
+        return None
+    if not os.path.isfile(libsqlite4):
+        print(f"Warning: libsqlite4.a missing, cannot build {compact_bin}")
+        return None
+
+    cmd = [
+        "gcc", "-O2", compact_src,
+        "-I" + lsm_dir,
+        "-I" + os.path.join(lsm_dir, "src"),
+        "-L" + lsm_dir,
+        "-lsqlite4", "-lpthread", "-lm", "-lz", "-llz4",
+        "-o", compact_bin,
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        err = "\n".join(proc.stderr.strip().splitlines()[-8:])
+        print(f"Warning: failed to build compact_db:\n{err}")
+        return None
+    return compact_bin
 
 
 def drop_caches(enabled=True):
@@ -478,7 +512,7 @@ def format_io_summary(io_stats):
 
 
 def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
-                   gt_results, k, db_dir, is_sqlite3=False, auto_compact=False,
+                   gt_results, k, db_dir, is_sqlite3=False, use_compaction=True,
                    do_drop_cache=False, io_log_dir=None,
                    page_size_kb=None, lsm_compression="none", disk_device=DISK_DEVICE):
     db_path = os.path.join(db_dir, f"bench_{label}.db")
@@ -493,7 +527,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     child_env["DISKANN_IO_TIMING"] = "1"
 
     result = {"label": label}
-    need_compact = not is_sqlite3 and not auto_compact and compact_bin
+    need_compact = not is_sqlite3 and use_compaction and compact_bin
     n_phases = 4 if need_compact else 3
 
     print(f"\n{'='*60}")
@@ -561,7 +595,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     for block in extract_c_stat_blocks(ins_err):
         print(block)
 
-    # Compact (LSMobiVec with auto_compact=0 only)
+    # Compact (LSMobiVec only)
     if need_compact:
         print(f"  [2/{n_phases}] Compacting...")
         drop_caches()
@@ -570,11 +604,13 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
             compact_bin, db_path, env=child_env, lsm_compression=lsm_compression
         )
         t_compact = time.time() - t0
+        compact_real_s = compact_time_stats.get("real_s", t_compact)
         size_after = file_size_mb(db_path)
-        result["compact_time_s"] = round(t_compact, 2)
+        result["compact_time_s"] = round(compact_real_s, 2)
+        result["compact_wall_time_s"] = round(t_compact, 2)
         result["compact_size_mb"] = round(size_after, 1)
         result["compact_time_stats"] = compact_time_stats
-        print(f"        {t_compact:.1f}s, {size_before:.1f} -> {size_after:.1f} MB")
+        print(f"        {compact_real_s:.1f}s, {size_before:.1f} -> {size_after:.1f} MB")
         if compact_time_stats:
             print(
                 f"        time: real={compact_time_stats.get('real_s', 0):.2f}s  "
@@ -672,9 +708,8 @@ def main():
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
     parser.add_argument("--lsm-compression", type=str, default="none", choices=["none", "zlib", "lz4"],
                         help="LSM storage page compression for LSMobiVec configs")
-    parser.add_argument("--auto-compact", type=int, default=1, choices=[0, 1],
-                        help="0: use compact_db after insert (autowork=0), "
-                             "1: skip compact_db (autowork=1 handles it)")
+    parser.add_argument("--use-compaction", type=int, default=0, choices=[0, 1],
+                        help="1: use compact_db after insert for LSMobiVec configs, 0: skip compact_db")
     parser.add_argument("--drop-cache", action="store_true",
                         help="Drop OS page cache before each timed phase (requires sudo)")
     parser.add_argument("--disk-device", type=str, default="auto",
@@ -702,18 +737,22 @@ def main():
         print("Error: no valid datasets found.")
         return 1
 
+    use_compaction = bool(args.use_compaction)
+
     # Build configs: (label, shell, compact_bin_or_None, is_sqlite3, page_size_kb)
     configs = []
 
     if args.lsm_dir:
         shell = os.path.join(args.lsm_dir, "LSMobiVec")
-        compact = os.path.join(args.lsm_dir, "compact_db")
         if not os.path.isfile(shell):
             print("Warning: LSMobiVec binary missing, skipping LSMobiVec configs")
         else:
-            compact_bin = compact if os.path.isfile(compact) else None
-            for ps_kb in page_sizes_kb:
-                configs.append((f"lsm_{ps_kb}kb", shell, compact_bin, False, ps_kb))
+            compact_bin = build_compact_binary(args.lsm_dir) if use_compaction else None
+            if use_compaction and compact_bin is None:
+                print("Warning: compact_db unavailable, skipping LSMobiVec configs")
+            else:
+                for ps_kb in page_sizes_kb:
+                    configs.append((f"lsm_{ps_kb}kb", shell, compact_bin, False, ps_kb))
 
     if args.sqlite3_dir:
         shell = os.path.join(args.sqlite3_dir, "sqlite3")
@@ -727,14 +766,13 @@ def main():
         print("Error: no valid configurations found.")
         return 1
 
-    auto_compact = bool(args.auto_compact)
     disk_device = (
         detect_disk_device(args.db_dir) if args.disk_device == "auto" else args.disk_device
     )
     print(f"Datasets:     {', '.join(n for n, _, _, _ in datasets)}")
     print(f"Configs:      {', '.join(cfg[0] for cfg in configs)}")
     print(f"LSM compression: {args.lsm_compression}")
-    print(f"Auto-compact: {'ON (no compact_db)' if auto_compact else 'OFF (use compact_db)'}")
+    print(f"Compaction:   {'ON (use compact_db)' if use_compaction else 'OFF'}")
     print("Internal I/O timing: ON")
     print(f"Disk device:  /dev/{disk_device}" + (" (auto)" if args.disk_device == "auto" else ""))
     print(f"I/O log dir:  {args.io_log_dir}")
@@ -763,7 +801,7 @@ def main():
             result = run_one_config(
                 run_label, shell, compact_bin, insert_sql_prepared, query_sql,
                 gt_results, args.k, args.db_dir, is_sqlite3=is_s3,
-                auto_compact=auto_compact, do_drop_cache=args.drop_cache,
+                use_compaction=use_compaction, do_drop_cache=args.drop_cache,
                 io_log_dir=args.io_log_dir, page_size_kb=ps_kb,
                 lsm_compression=args.lsm_compression, disk_device=disk_device
             )
@@ -779,7 +817,7 @@ def main():
         all_results[ds_name] = ds_results
 
     # Summary per dataset
-    show_compact = not auto_compact
+    show_compact = use_compaction
     for ds_name, ds_results in all_results.items():
         ins_hdr = (
             f"{'Overall':>8} {'Table':>8} {'Build':>8} {'ReadIO':>8} "
