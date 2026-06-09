@@ -561,7 +561,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     for block in extract_c_stat_blocks(ins_err):
         print(block)
 
-    # Compact (sqlite4 with auto_compact=0 only)
+    # Compact (LSMobiVec with auto_compact=0 only)
     if need_compact:
         print(f"  [2/{n_phases}] Compacting...")
         drop_caches()
@@ -664,14 +664,14 @@ def main():
     parser.add_argument("--datasets", type=str, default="glove,sift,coco,cohere",
                         help="Comma-separated dataset names (default: glove,sift,coco,cohere)")
     parser.add_argument("--k", type=int, default=10)
-    parser.add_argument("--sqlite4-dir", type=str, default="./sqlite4_lsm",
-                        help="Directory containing sqlite4 and optional compact_db")
-    parser.add_argument("--sqlite3-dir", type=str, default="./sqlite3_libsql",
+    parser.add_argument("--lsm-dir", type=str, default="./LSMobiVec",
+                        help="Directory containing LSMobiVec and optional compact_db")
+    parser.add_argument("--sqlite3-dir", type=str, default="./LibSQL",
                         help="Directory containing sqlite3")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
     parser.add_argument("--lsm-compression", type=str, default="none", choices=["none", "zlib", "lz4"],
-                        help="LSM storage page compression for sqlite4 configs")
+                        help="LSM storage page compression for LSMobiVec configs")
     parser.add_argument("--auto-compact", type=int, default=1, choices=[0, 1],
                         help="0: use compact_db after insert (autowork=0), "
                              "1: skip compact_db (autowork=1 handles it)")
@@ -705,11 +705,11 @@ def main():
     # Build configs: (label, shell, compact_bin_or_None, is_sqlite3, page_size_kb)
     configs = []
 
-    if args.sqlite4_dir:
-        shell = os.path.join(args.sqlite4_dir, "sqlite4")
-        compact = os.path.join(args.sqlite4_dir, "compact_db")
+    if args.lsm_dir:
+        shell = os.path.join(args.lsm_dir, "LSMobiVec")
+        compact = os.path.join(args.lsm_dir, "compact_db")
         if not os.path.isfile(shell):
-            print("Warning: sqlite4 binary missing, skipping sqlite4 configs")
+            print("Warning: LSMobiVec binary missing, skipping LSMobiVec configs")
         else:
             compact_bin = compact if os.path.isfile(compact) else None
             for ps_kb in page_sizes_kb:
