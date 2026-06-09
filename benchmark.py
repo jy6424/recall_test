@@ -10,6 +10,70 @@ TIME_MARKER = "__TIME__"
 DISK_DEVICE = "mmcblk0p1"
 
 
+def _diskstats_devices():
+    devices = set()
+    try:
+        with open("/proc/diskstats") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3:
+                    devices.add(parts[2])
+    except OSError:
+        pass
+    return devices
+
+
+def _existing_path_for_mount(path):
+    path = os.path.abspath(path)
+    while not os.path.exists(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            return "."
+        path = parent
+    return path
+
+
+def detect_disk_device(path, fallback=DISK_DEVICE):
+    devices = _diskstats_devices()
+    if not devices:
+        return fallback
+
+    target = _existing_path_for_mount(path)
+    try:
+        proc = subprocess.run(
+            ["findmnt", "-no", "SOURCE", "--target", target],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return fallback
+
+    source = proc.stdout.strip().splitlines()[0] if proc.stdout.strip() else ""
+    candidates = []
+    if source.startswith("/dev/"):
+        candidates.append(os.path.basename(source))
+        candidates.append(os.path.basename(os.path.realpath(source)))
+
+        try:
+            proc = subprocess.run(
+                ["lsblk", "-no", "PKNAME", source],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=True,
+            )
+            candidates.extend(x.strip() for x in proc.stdout.splitlines() if x.strip())
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+
+    for device in candidates:
+        if device in devices:
+            return device
+    return fallback
+
+
 class DiskStatsMonitor:
     def __init__(self, device, interval_s=1.0, log_path=None):
         self.device = device
@@ -415,8 +479,8 @@ def format_io_summary(io_stats):
 
 def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                    gt_results, k, db_dir, is_sqlite3=False, auto_compact=False,
-                   do_drop_cache=False, internal_io_timing=False, io_log_dir=None,
-                   page_size_kb=None, lsm_compression="none"):
+                   do_drop_cache=False, io_log_dir=None,
+                   page_size_kb=None, lsm_compression="none", disk_device=DISK_DEVICE):
     db_path = os.path.join(db_dir, f"bench_{label}.db")
     db_target = build_db_target(
         db_path,
@@ -426,7 +490,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     )
     cleanup_db(db_path, is_sqlite3)
     child_env = os.environ.copy()
-    child_env["DISKANN_IO_TIMING"] = "1" if internal_io_timing else "0"
+    child_env["DISKANN_IO_TIMING"] = "1"
 
     result = {"label": label}
     need_compact = not is_sqlite3 and not auto_compact and compact_bin
@@ -451,7 +515,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     # Insert (timed — equivalent to ann-benchmarks fit())
     drop_caches(do_drop_cache)
     insert_log = os.path.join(io_log_dir, f"{label}_insert_io.csv") if io_log_dir else None
-    insert_mon = DiskStatsMonitor(DISK_DEVICE, log_path=insert_log).start()
+    insert_mon = DiskStatsMonitor(disk_device, log_path=insert_log).start()
     t0 = time.time()
     ins_out, ins_err, ins_time = run_shell(shell, db_target, "\n".join(insert_lines), env=child_env)
     t_insert = time.time() - t0
@@ -532,7 +596,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
 
     drop_caches(do_drop_cache)
     query_log = os.path.join(io_log_dir, f"{label}_query_io.csv") if io_log_dir else None
-    query_mon = DiskStatsMonitor(DISK_DEVICE, log_path=query_log).start()
+    query_mon = DiskStatsMonitor(disk_device, log_path=query_log).start()
     t0 = time.time()
     ann_out, q_err, q_time_stats = run_shell(shell, db_target, query_sql, env=child_env)
     t_query = time.time() - t0
@@ -598,7 +662,7 @@ def main():
     parser.add_argument("--dataset-dir", type=str, default=os.path.expanduser("./dataset"),
                         help="Directory with SQL files (default: ./dataset)")
     parser.add_argument("--datasets", type=str, default="glove,sift,coco,cohere",
-                        help="Comma-separated dataset names (default: glove,sift)")
+                        help="Comma-separated dataset names (default: glove,sift,coco,cohere)")
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--sqlite4-dir", type=str, default="./sqlite4_lsm",
                         help="Directory containing sqlite4 and optional compact_db")
@@ -613,10 +677,10 @@ def main():
                              "1: skip compact_db (autowork=1 handles it)")
     parser.add_argument("--drop-cache", action="store_true",
                         help="Drop OS page cache before each timed phase (requires sudo)")
-    parser.add_argument("--internal-io-timing", type=int, default=1, choices=[0, 1],
-                        help="0: disable per-op internal read/write I/O timing, 1: enable it")
+    parser.add_argument("--disk-device", type=str, default="auto",
+                        help="Block device name from /proc/diskstats, or 'auto' to detect from --db-dir")
     parser.add_argument("--io-log-dir", type=str, default="./io_logs",
-                        help="Directory to store per-run disk I/O CSV logs")
+                        help="Directory to store disk I/O CSV logs")
     args = parser.parse_args()
 
     page_sizes_kb = [int(x) for x in args.page_sizes.split(",")]
@@ -664,12 +728,15 @@ def main():
         return 1
 
     auto_compact = bool(args.auto_compact)
+    disk_device = (
+        detect_disk_device(args.db_dir) if args.disk_device == "auto" else args.disk_device
+    )
     print(f"Datasets:     {', '.join(n for n, _, _, _ in datasets)}")
     print(f"Configs:      {', '.join(cfg[0] for cfg in configs)}")
     print(f"LSM compression: {args.lsm_compression}")
     print(f"Auto-compact: {'ON (no compact_db)' if auto_compact else 'OFF (use compact_db)'}")
-    print(f"Internal I/O timing: {'ON' if args.internal_io_timing else 'OFF'}")
-    print(f"Disk device:  /dev/{DISK_DEVICE}")
+    print("Internal I/O timing: ON")
+    print(f"Disk device:  /dev/{disk_device}" + (" (auto)" if args.disk_device == "auto" else ""))
     print(f"I/O log dir:  {args.io_log_dir}")
     print(f"DB dir:       {args.db_dir}")
     print(f"Total runs:   {len(datasets) * len(configs)}")
@@ -697,9 +764,8 @@ def main():
                 run_label, shell, compact_bin, insert_sql_prepared, query_sql,
                 gt_results, args.k, args.db_dir, is_sqlite3=is_s3,
                 auto_compact=auto_compact, do_drop_cache=args.drop_cache,
-                internal_io_timing=bool(args.internal_io_timing),
                 io_log_dir=args.io_log_dir, page_size_kb=ps_kb,
-                lsm_compression=args.lsm_compression
+                lsm_compression=args.lsm_compression, disk_device=disk_device
             )
             ds_results.append(result)
 

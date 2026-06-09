@@ -5161,9 +5161,6 @@ static int accessPayload(
           u8 *aWrite = &pBuf[-4];
           assert( aWrite>=pBufStart );                         /* due to (6) */
           memcpy(aSave, aWrite, 4);
-		  // (jhpark): read overflow page directly
-		  //fprintf(stderr, "[KU] read overflow page directly size: %d offset: %d pgno: %d\n"
-		  //		  , a+4, (i64)pBt->pageSize*(nextPage-1),  (i64)pBt->pageSize*(nextPage-1)/4096 + 1);
           rc = sqlite3OsRead(fd, aWrite, a+4, (i64)pBt->pageSize*(nextPage-1));
           nextPage = get4byte(aWrite);
           memcpy(aWrite, aSave, 4);
