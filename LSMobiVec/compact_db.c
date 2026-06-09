@@ -1,7 +1,7 @@
 /*
 ** compact_db.c
 **
-** Manually run LSM compaction on a sqlite4_libsql database file.
+** Manually run LSM compaction on a LSMobiVec database file.
 ** Use this after bulk inserts when LSM_DFLT_AUTOWORK=0.
 **
 ** Build:
