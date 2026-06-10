@@ -386,10 +386,13 @@ def build_schema_sql(schema_lines, page_size_kb):
     return "\n".join([pragma] + schema_lines)
 
 
-def prepare_insert_sql(sql_text, page_size_kb, is_sqlite3=False, use_compaction=False):
+def prepare_insert_sql(sql_text, page_size_kb, is_sqlite3=False,
+                       use_compaction=False, lsm_autoflush_mb=None):
     pragmas = []
     if page_size_kb is not None:
         pragmas.append(f"PRAGMA page_size={page_size_kb * 1024};")
+    if not is_sqlite3 and lsm_autoflush_mb is not None:
+        pragmas.append(f"PRAGMA lsm_autoflush={lsm_autoflush_mb * 1024};")
     if not pragmas:
         return sql_text
     return "\n".join(pragmas) + "\n" + sql_text
@@ -716,6 +719,8 @@ def main():
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
     parser.add_argument("--lsm-compression", type=str, default="none", choices=["none", "zlib", "lz4"],
                         help="LSM storage page compression for LSMobiVec configs")
+    parser.add_argument("--lsm-autoflush-mb", type=int, default=None,
+                        help="Set LSM autoflush threshold in MB for LSMobiVec configs")
     parser.add_argument("--use-compaction", type=int, default=0, choices=[0, 1],
                         help="1: use compact_db after insert for LSMobiVec configs, 0: skip compact_db")
     parser.add_argument("--drop-cache", action="store_true",
@@ -728,6 +733,9 @@ def main():
 
     page_sizes_kb = [int(x) for x in args.page_sizes.split(",")]
     dataset_names = [x.strip() for x in args.datasets.split(",")]
+    if args.lsm_autoflush_mb is not None and args.lsm_autoflush_mb <= 0:
+        print("Error: --lsm-autoflush-mb must be positive.")
+        return 1
 
     # Validate datasets
     datasets = []
@@ -780,6 +788,7 @@ def main():
     print(f"Datasets:     {', '.join(n for n, _, _, _ in datasets)}")
     print(f"Configs:      {', '.join(cfg[0] for cfg in configs)}")
     print(f"LSM compression: {args.lsm_compression}")
+    print(f"LSM autoflush: {'default' if args.lsm_autoflush_mb is None else str(args.lsm_autoflush_mb) + ' MB'}")
     print(f"Compaction:   {'ON (use compact_db)' if use_compaction else 'OFF'}")
     print("Internal I/O timing: ON")
     print(f"Disk device:  /dev/{disk_device}" + (" (auto)" if args.disk_device == "auto" else ""))
@@ -806,6 +815,7 @@ def main():
                 ps_kb,
                 is_sqlite3=is_s3,
                 use_compaction=use_compaction,
+                lsm_autoflush_mb=args.lsm_autoflush_mb,
             )
             insert_sql_prepared = os.path.join(args.db_dir, f".schema_{run_label}.sql")
             with open(insert_sql_prepared, "w") as f:
