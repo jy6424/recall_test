@@ -708,8 +708,8 @@ def main():
     parser = argparse.ArgumentParser(description="LSM vector benchmark")
     parser.add_argument("--dataset-dir", type=str, default=os.path.expanduser("./dataset"),
                         help="Directory with SQL files (default: ./dataset)")
-    parser.add_argument("--datasets", type=str, default="glove,sift,coco,cohere",
-                        help="Comma-separated dataset names (default: glove,sift,coco,cohere)")
+    parser.add_argument("--datasets", type=str, default="sift,glove,coco,cohere",
+                        help="Comma-separated dataset names (default: sift,glove,coco,cohere)")
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--lsm-dir", type=str, default="./LSMobiVec",
                         help="Directory containing the LSMobiVec/sqlite4 shell and optional compact_db")
@@ -790,7 +790,6 @@ def main():
     print(f"LSM compression: {args.lsm_compression}")
     print(f"LSM autoflush: {'default' if args.lsm_autoflush_mb is None else str(args.lsm_autoflush_mb) + ' MB'}")
     print(f"Compaction:   {'ON (use compact_db)' if use_compaction else 'OFF'}")
-    print("Internal I/O timing: ON")
     print(f"Disk device:  /dev/{disk_device}" + (" (auto)" if args.disk_device == "auto" else ""))
     print(f"I/O log dir:  {args.io_log_dir}")
     print(f"DB dir:       {args.db_dir}")
