@@ -539,31 +539,28 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         print(f"  Compact: {compact_bin}")
     print(f"{'='*60}")
 
-    # Schema (not timed — equivalent to ann-benchmarks algorithm setup)
-    insert_sql = read_sql(insert_sql_path)
-    schema_lines, insert_lines = split_schema_inserts(insert_sql)
-
     print(f"  [1/{n_phases}] Schema + Insert...")
-    run_shell(shell, db_target, "\n".join(schema_lines), env=child_env)  # ignore return tuple
 
-    # Insert (timed — equivalent to ann-benchmarks fit())
+    # Keep schema and inserts in one shell session so LSM lock state and any
+    # transaction statements in the SQL file stay in their original order.
+    insert_sql = read_sql(insert_sql_path)
     drop_caches(do_drop_cache)
     insert_log = os.path.join(io_log_dir, f"{label}_insert_io.csv") if io_log_dir else None
     insert_mon = DiskStatsMonitor(disk_device, log_path=insert_log).start()
     t0 = time.time()
-    ins_out, ins_err, ins_time = run_shell(shell, db_target, "\n".join(insert_lines), env=child_env)
+    ins_out, ins_err, ins_time = run_shell(shell, db_target, insert_sql, env=child_env)
     t_insert = time.time() - t0
     result["insert_disk_io"] = insert_mon.stop()
 
     # Check for silent SQL errors (shell continues past errors but sets gHasError)
     err_lines = [l for l in ins_err.splitlines() if l.startswith("Error:")]
     if err_lines:
-        print(f"        !! {len(err_lines)} SQL errors during insert:")
+        print(f"        !! {len(err_lines)} SQL errors during schema/insert:")
         for l in err_lines[:5]:
             print(f"           {l}")
         if len(err_lines) > 5:
             print(f"           ... ({len(err_lines)-5} more)")
-        raise RuntimeError(f"insert phase had {len(err_lines)} SQL errors")
+        raise RuntimeError(f"schema/insert phase had {len(err_lines)} SQL errors")
 
     size_before = file_size_mb(db_path)
     result["insert_time_s"] = round(t_insert, 2)
@@ -701,7 +698,7 @@ def main():
                         help="Comma-separated dataset names (default: glove,sift,coco,cohere)")
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--lsm-dir", type=str, default="./LSMobiVec",
-                        help="Directory containing LSMobiVec and optional compact_db")
+                        help="Directory containing the LSMobiVec/sqlite4 shell and optional compact_db")
     parser.add_argument("--sqlite3-dir", type=str, default="./LibSQL",
                         help="Directory containing sqlite3")
     parser.add_argument("--db-dir", type=str, default=".")
@@ -743,9 +740,9 @@ def main():
     configs = []
 
     if args.lsm_dir:
-        shell = os.path.join(args.lsm_dir, "LSMobiVec")
+        shell = os.path.join(args.lsm_dir, "sqlite4")
         if not os.path.isfile(shell):
-            print("Warning: LSMobiVec binary missing, skipping LSMobiVec configs")
+            print("Warning: LSMobiVec sqlite4 shell missing, skipping LSMobiVec configs")
         else:
             compact_bin = build_compact_binary(args.lsm_dir) if use_compaction else None
             if use_compaction and compact_bin is None:
