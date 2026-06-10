@@ -404,7 +404,10 @@ def build_db_target(db_path, is_sqlite3=False, page_size_kb=None, lsm_compressio
     """Return the shell target used to open the database."""
     if is_sqlite3 or page_size_kb is None:
         return db_path
-    params = [f"page_size={page_size_kb * 1024}"]
+    params = [
+        f"page_size={page_size_kb * 1024}",
+        "lsm_multiple_processes=0",
+    ]
     if lsm_compression and lsm_compression != "none":
         params.append(f"lsm_compression={lsm_compression}")
     return f"file:{db_path}?{'&'.join(params)}"
