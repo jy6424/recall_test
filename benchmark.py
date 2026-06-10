@@ -386,6 +386,20 @@ def build_schema_sql(schema_lines, page_size_kb):
     return "\n".join([pragma] + schema_lines)
 
 
+def prepare_insert_sql(sql_text, page_size_kb, is_sqlite3=False, use_compaction=False):
+    pragmas = []
+    if page_size_kb is not None:
+        pragmas.append(f"PRAGMA page_size={page_size_kb * 1024};")
+    if not is_sqlite3 and use_compaction:
+        pragmas.extend([
+            "PRAGMA lsm_autowork=0;",
+            "PRAGMA lsm_autocheckpoint=0;",
+        ])
+    if not pragmas:
+        return sql_text
+    return "\n".join(pragmas) + "\n" + sql_text
+
+
 def build_db_target(db_path, is_sqlite3=False, page_size_kb=None, lsm_compression="none"):
     """Return the shell target used to open the database."""
     if is_sqlite3 or page_size_kb is None:
@@ -790,11 +804,15 @@ def main():
         for label, shell, compact_bin, is_s3, ps_kb in configs:
             run_label = f"{ds_name}_{label}"
             insert_sql_text = read_sql(insert_sql)
-            schema_lines, insert_lines = split_schema_inserts(insert_sql_text)
-            schema_sql = build_schema_sql(schema_lines, ps_kb)
+            prepared_sql = prepare_insert_sql(
+                insert_sql_text,
+                ps_kb,
+                is_sqlite3=is_s3,
+                use_compaction=use_compaction,
+            )
             insert_sql_prepared = os.path.join(args.db_dir, f".schema_{run_label}.sql")
             with open(insert_sql_prepared, "w") as f:
-                f.write(schema_sql + "\n" + "\n".join(insert_lines) + "\n")
+                f.write(prepared_sql + "\n")
             result = run_one_config(
                 run_label, shell, compact_bin, insert_sql_prepared, query_sql,
                 gt_results, args.k, args.db_dir, is_sqlite3=is_s3,
