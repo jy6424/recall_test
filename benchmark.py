@@ -390,24 +390,17 @@ def prepare_insert_sql(sql_text, page_size_kb, is_sqlite3=False, use_compaction=
     pragmas = []
     if page_size_kb is not None:
         pragmas.append(f"PRAGMA page_size={page_size_kb * 1024};")
-    if not is_sqlite3 and use_compaction:
-        pragmas.extend([
-            "PRAGMA lsm_autowork=0;",
-            "PRAGMA lsm_autocheckpoint=0;",
-        ])
     if not pragmas:
         return sql_text
     return "\n".join(pragmas) + "\n" + sql_text
 
 
-def build_db_target(db_path, is_sqlite3=False, page_size_kb=None, lsm_compression="none"):
+def build_db_target(db_path, is_sqlite3=False, page_size_kb=None,
+                    lsm_compression="none", use_compaction=False):
     """Return the shell target used to open the database."""
     if is_sqlite3 or page_size_kb is None:
         return db_path
-    params = [
-        f"page_size={page_size_kb * 1024}",
-        "lsm_multiple_processes=0",
-    ]
+    params = [f"page_size={page_size_kb * 1024}"]
     if lsm_compression and lsm_compression != "none":
         params.append(f"lsm_compression={lsm_compression}")
     return f"file:{db_path}?{'&'.join(params)}"
@@ -538,6 +531,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         is_sqlite3=is_sqlite3,
         page_size_kb=page_size_kb,
         lsm_compression=lsm_compression,
+        use_compaction=use_compaction,
     )
     cleanup_db(db_path, is_sqlite3)
     child_env = os.environ.copy()

@@ -128,16 +128,6 @@ int main(int argc, char **argv){
     return 1;
   }
 
-  {
-    int singleProcess = 0;
-    rc = lsm_config(pDb, LSM_CONFIG_MULTIPLE_PROCESSES, &singleProcess);
-    if( rc != 0 ){
-      fprintf(stderr, "lsm_config multiple_processes failed: %d\n", rc);
-      lsm_close(pDb);
-      return 1;
-    }
-  }
-
   if( argc >= 3 && strcmp(argv[2], "zlib")==0 ){
     rc = lsm_config(pDb, LSM_CONFIG_SET_COMPRESSION, &compactZlibCompression);
     if( rc != 0 ){
