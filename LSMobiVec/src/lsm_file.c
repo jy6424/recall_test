@@ -121,7 +121,7 @@
 **     * A second copy of the 3-byte record header.
 **
 ** A page number is a byte offset into the database file. So the smallest
-** possible page number is 8192 (immediately after the two meta-pages).
+** possible page number is immediately after the two meta-pages.
 ** The first and root page of a segment are identified by a page number
 ** corresponding to the byte offset of the first byte in the corresponding
 ** page record. The last page of a segment is identified by the byte offset
@@ -307,9 +307,9 @@ struct MetaPage {
 
 /*
 ** Number of pgsz byte pages omitted from the start of block 1. The start
-** of block 1 contains two 4096 byte meta pages (8192 bytes in total).
+** of block 1 contains two meta pages (LSM_META_PAGE_SIZE bytes each).
 */
-#define BLOCK1_HDR_SIZE(pgsz)  LSM_MAX(1, 8192/(pgsz))
+#define BLOCK1_HDR_SIZE(pgsz)  LSM_MAX(1, (2 * LSM_META_PAGE_SIZE)/(pgsz))
 
 /*
 ** If NDEBUG is not defined, set a breakpoint in function lsmIoerrBkpt()
@@ -635,7 +635,7 @@ int lsmFsOpen(
     pFS->zLog = &pFS->zDb[nDb+1];
     pFS->nPagesize = LSM_DFLT_PAGE_SIZE;
     pFS->nBlocksize = LSM_DFLT_BLOCK_SIZE;
-    pFS->nMetasize = 4 * 1024;
+    pFS->nMetasize = LSM_META_PAGE_SIZE;
     pFS->pDb = pDb;
     pFS->pEnv = pDb->pEnv;
 

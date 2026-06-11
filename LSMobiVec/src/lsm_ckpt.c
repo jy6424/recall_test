@@ -113,7 +113,7 @@
 **
 ** A limit on the number of rhs segments that may be present in the database
 ** file. Defining this limit ensures that all level records fit within
-** the 4096 byte limit for checkpoint blobs.
+** the meta-page limit for checkpoint blobs.
 **
 ** The number of right-hand-side segments in a database is counted as 
 ** follows:
@@ -144,8 +144,7 @@
 ** on the number of free-list entries stored in a checkpoint. Since each 
 ** free-list entry consists of 3 integers, the maximum free-list size is 
 ** 3*100=300 integers. Combined with the limit on rhs segments defined
-** above, this ensures that a checkpoint always fits within a 4096 byte
-** meta page.
+** above, this ensures that a checkpoint fits within a meta page.
 **
 ** If the database contains more than 100 free blocks, the "overflow" flag
 ** in the checkpoint header is set and the remainder are stored in the

@@ -125,7 +125,7 @@ int lsmErrorBkpt(int);
 
 
 /* The size of each shared-memory chunk */
-#define LSM_SHM_CHUNK_SIZE (32*1024)
+#define LSM_SHM_CHUNK_SIZE (256*1024)
 
 /* The number of bytes reserved at the start of each shm chunk for MM. */
 #define LSM_SHM_CHUNK_HDR  (sizeof(ShmChunk))
