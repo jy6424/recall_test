@@ -2,6 +2,7 @@ import subprocess
 import argparse
 import os
 import re
+import select
 import time
 import threading
 from datetime import datetime
@@ -298,19 +299,57 @@ def run_shell(shell, db, sql_input, env=None):
 
 
 def run_compact(compact_bin, db, env=None, lsm_compression="none"):
+    timeout_s = 20000
     cmd = [compact_bin, db]
     if lsm_compression and lsm_compression != "none":
         cmd.append(lsm_compression)
     if os.path.exists("/usr/bin/time"):
         cmd = ["/usr/bin/time", "-f", f"{TIME_MARKER} real=%e user=%U sys=%S"] + cmd
-    proc = subprocess.run(
+
+    proc = subprocess.Popen(
         cmd,
-        capture_output=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=20000,
         env=env,
     )
-    stderr_text, time_stats = parse_time_stats(proc.stderr)
+
+    stderr_lines = []
+    deadline = time.monotonic() + timeout_s
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            proc.kill()
+            proc.wait()
+            raise subprocess.TimeoutExpired(cmd, timeout_s)
+
+        ready, _, _ = select.select([proc.stderr], [], [], min(0.5, remaining))
+        if ready:
+            line = proc.stderr.readline()
+            if line:
+                stderr_lines.append(line)
+                if not line.startswith(TIME_MARKER):
+                    print(f"        {line.rstrip()}")
+        elif proc.poll() is not None:
+            rest = proc.stderr.read()
+            if rest:
+                stderr_lines.append(rest)
+                for line in rest.splitlines():
+                    if not line.startswith(TIME_MARKER):
+                        print(f"        {line.rstrip()}")
+            break
+
+        if proc.poll() is not None:
+            rest = proc.stderr.read()
+            if rest:
+                stderr_lines.append(rest)
+                for line in rest.splitlines():
+                    if not line.startswith(TIME_MARKER):
+                        print(f"        {line.rstrip()}")
+            break
+
+    stderr_text = "".join(stderr_lines)
+    stderr_text, time_stats = parse_time_stats(stderr_text)
     if proc.returncode != 0:
         err_lines = [l for l in stderr_text.splitlines() if l.strip()]
         err_msg = "\n".join(err_lines[-10:]) if err_lines else stderr_text[-500:]
