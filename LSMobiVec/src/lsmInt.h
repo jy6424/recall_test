@@ -59,7 +59,7 @@
 #define LSM_CKSUM0_INIT 42
 #define LSM_CKSUM1_INIT 42
 
-#define LSM_META_PAGE_SIZE 4096
+#define LSM_META_PAGE_SIZE (64 * 1024)
 
 /* "mmap" mode is currently only used in environments with 64-bit address 
 ** spaces. The following macro is used to test for this.  */
@@ -156,10 +156,12 @@ int lsmErrorBkpt(int);
 #define LSM_MAX_FREELIST_ENTRIES 24
 
 /*
-** Block redirects are stored directly in the 4KB checkpoint image. Keep this
-** small unless redirect overflow storage is implemented.
+** Block redirects are stored directly in the checkpoint image. This branch
+** uses a larger meta-page/checkpoint size for benchmark databases so reclaim
+** can preserve many redirects without merge compaction. Databases created
+** with a different LSM_META_PAGE_SIZE are not layout-compatible.
 */
-#define LSM_MAX_BLOCK_REDIRECTS 16
+#define LSM_MAX_BLOCK_REDIRECTS 4096
 
 #define LSM_ATTEMPTS_BEFORE_PROTOCOL 10000
 
