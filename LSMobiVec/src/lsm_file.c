@@ -309,7 +309,8 @@ struct MetaPage {
 ** Number of pgsz byte pages omitted from the start of block 1. The start
 ** of block 1 contains two meta pages (LSM_META_PAGE_SIZE bytes each).
 */
-#define BLOCK1_HDR_SIZE(pgsz)  LSM_MAX(1, (2 * LSM_META_PAGE_SIZE)/(pgsz))
+#define BLOCK1_HDR_SIZE(pgsz) \
+  LSM_MAX(1, ((2 * LSM_META_PAGE_SIZE) + (pgsz) - 1)/(pgsz))
 
 /*
 ** If NDEBUG is not defined, set a breakpoint in function lsmIoerrBkpt()
