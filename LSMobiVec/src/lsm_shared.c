@@ -753,6 +753,16 @@ static int findFreeblock(lsm_db *pDb, i64 iInUse, int bNotOne, int *piRet){
   return rc;
 }
 
+static int blockIsRedirectSource(Snapshot *p, int iBlk){
+  int i;
+  for(i=0; i<p->redirect.n; i++){
+    if( p->redirect.a[i].iFrom==iBlk ){
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /*
 ** Allocate a new database file block to write data to, either by extending
 ** the database file or by recycling a free-list entry. The worker snapshot 
@@ -842,7 +852,9 @@ int lsmBlockAllocate(lsm_db *pDb, int iBefore, int *piBlk){
         rc = dbTruncate(pDb, iInUse);
       }
     }else{
-      iRet = ++(p->nBlock);
+      do {
+        iRet = ++(p->nBlock);
+      } while( blockIsRedirectSource(p, iRet) );
 #ifdef LSM_LOG_FREELIST
       lsmLogMessage(pDb, 0, "extending file to %d blocks", iRet);
 #endif

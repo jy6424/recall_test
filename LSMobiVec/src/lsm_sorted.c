@@ -5367,9 +5367,9 @@ int lsm_work(lsm_db *pDb, int nMerge, int nKB, int *pnWrite){
 ** file to free slots near the beginning, then truncating. This does NOT
 ** perform any merging — the level structure is preserved as-is.
 **
-** Each batch moves up to LSM_MAX_BLOCK_REDIRECTS blocks. After each batch
-** the redirect table and trailing free blocks are cleaned up, then a
-** checkpoint is written so the next batch starts fresh.
+** This may move up to LSM_MAX_BLOCK_REDIRECTS blocks total for the current
+** snapshot. Redirects are intentionally preserved after the checkpoint, so
+** this is a bounded reclaim-only operation rather than a full compaction.
 */
 int lsm_reclaim(lsm_db *pDb, int nKB, int *pnWrite){
   int rc = LSM_OK;
@@ -5381,7 +5381,7 @@ int lsm_reclaim(lsm_db *pDb, int nKB, int *pnWrite){
   lsmFsPurgeCache(pDb->pFS);
   nPgsz = lsmFsPageSize(pDb->pFS);
 
-  /* Move up to 16 blocks (redirect limit), then shrink nBlock and truncate.
+  /* Move up to LSM_MAX_BLOCK_REDIRECTS blocks, then shrink nBlock and truncate.
   ** The redirect array must be preserved (not cleared) because internal page
   ** pointers on disk still reference old block numbers. The checkpoint load
   ** in lsm_ckpt.c sets pRedirect on ALL segments so they all use it. */
@@ -5389,22 +5389,11 @@ int lsm_reclaim(lsm_db *pDb, int nKB, int *pnWrite){
   rc = lsmBeginWork(pDb);
   if( rc!=LSM_OK ) goto reclaim_out;
 
-  /* sortedMoveBlock creates a redirect array shared by ALL segments.
-  ** lsmFsSortedDelete clears the ENTIRE redirect when ANY segment is
-  ** deleted. So block moves are only safe when all data is in a single
-  ** level — otherwise a future merge on one level would clear the redirect
-  ** while other levels still need it, causing SIGBUS on truncated blocks. */
-  {
-    Level *pTop = lsmDbSnapshotLevel(pDb->pWorker);
-    if( pTop==0 || pTop->pNext!=0 ){
-      /* Multiple levels exist — cannot safely move blocks. */
-      int rcdummy = LSM_BUSY;
-      lsmFinishWork(pDb, 0, &rcdummy);
-      goto reclaim_out;
-    }
-  }
-
-  /* Move blocks until redirect array is full or no more work */
+  /* Reclaim works at the snapshot/block-layout level, not per-level. It moves
+  ** the current highest live block into an earlier free block and records a
+  ** snapshot-wide redirect. This preserves the existing LSM level/segment
+  ** structure while allowing the file tail to be truncated. The redirect
+  ** count is deliberately small because redirects live in the checkpoint. */
   while( rc==LSM_OK ){
     int nDone = 0;
     rc = sortedMoveBlock(pDb, &nDone);

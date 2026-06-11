@@ -155,6 +155,10 @@ int lsmErrorBkpt(int);
 */
 #define LSM_MAX_FREELIST_ENTRIES 24
 
+/*
+** Block redirects are stored directly in the 4KB checkpoint image. Keep this
+** small unless redirect overflow storage is implemented.
+*/
 #define LSM_MAX_BLOCK_REDIRECTS 16
 
 #define LSM_ATTEMPTS_BEFORE_PROTOCOL 10000

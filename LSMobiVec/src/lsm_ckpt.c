@@ -851,6 +851,10 @@ int lsmCheckpointStore(lsm_db *pDb, int iMeta){
     int nCkpt;
 
     nCkpt = (int)pDb->aSnapshot[CKPT_HDR_NCKPT];
+    if( nCkpt>(LSM_META_PAGE_SIZE / sizeof(u32)) ){
+      lsmFsMetaPageRelease(pPg);
+      return LSM_FULL;
+    }
     aData = lsmFsMetaPageData(pPg, &nData);
     memcpy(aData, pDb->aSnapshot, nCkpt*sizeof(u32));
     ckptChangeEndianness((u32 *)aData, nCkpt);
@@ -1086,6 +1090,10 @@ int lsmCheckpointSaveWorker(lsm_db *pDb, int bFlush){
   if( rc!=LSM_OK ) return rc;
   assert( ckptChecksumOk((u32 *)p) );
 
+  if( n>LSM_META_PAGE_SIZE ){
+    lsmFree(pDb->pEnv, p);
+    return LSM_FULL;
+  }
   assert( n<=LSM_META_PAGE_SIZE );
   memcpy(pShm->aSnap2, p, n);
   lsmShmBarrier(pDb);

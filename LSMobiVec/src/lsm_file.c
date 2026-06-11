@@ -1783,10 +1783,11 @@ int lsmFsSortedDelete(
       iBlk = iNext;
     }
 
-    if( pDel->pRedirect ){
-      assert( pDel->pRedirect==&pSnapshot->redirect );
-      pSnapshot->redirect.n = 0;
-    }
+    /* Do not clear pSnapshot->redirect here. Block redirects belong to the
+    ** whole worker snapshot, not to a single segment. With multiple levels,
+    ** deleting one segment must not invalidate redirects still needed by
+    ** other segments. lsmBlockAllocate() avoids reusing redirect source
+    ** block numbers while these entries remain active. */
 
     if( bZero ) memset(pDel, 0, sizeof(Segment));
   }
