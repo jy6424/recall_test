@@ -290,12 +290,12 @@ static u32 getChildPtr(TreeNode *p, int iVersion, int iCell){
 ** Given an offset within the *-shm file, return the associated chunk number.
 */
 static int treeOffsetToChunk(u32 iOff){
-  assert( LSM_SHM_CHUNK_SIZE==(1<<15) );
-  return (int)(iOff>>15);
+  assert( LSM_SHM_CHUNK_SIZE==(1<<LSM_SHM_CHUNK_SHIFT) );
+  return (int)(iOff>>LSM_SHM_CHUNK_SHIFT);
 }
 
 #define treeShmptrUnsafe(pDb, iPtr) \
-(&((u8*)((pDb)->apShm[(iPtr)>>15]))[(iPtr) & (LSM_SHM_CHUNK_SIZE-1)])
+(&((u8*)((pDb)->apShm[(iPtr)>>LSM_SHM_CHUNK_SHIFT]))[(iPtr) & (LSM_SHM_CHUNK_SIZE-1)])
 
 /*
 ** Return a pointer to the mapped memory location associated with *-shm 
@@ -303,8 +303,8 @@ static int treeOffsetToChunk(u32 iOff){
 */
 static void *treeShmptr(lsm_db *pDb, u32 iPtr){
 
-  assert( (iPtr>>15)<pDb->nShm );
-  assert( pDb->apShm[iPtr>>15] );
+  assert( (iPtr>>LSM_SHM_CHUNK_SHIFT)<pDb->nShm );
+  assert( pDb->apShm[iPtr>>LSM_SHM_CHUNK_SHIFT] );
 
   return iPtr ? treeShmptrUnsafe(pDb, iPtr) : 0;
 }
@@ -361,7 +361,7 @@ static TreeKey *treeShmkey(
     if( eLoad==TKV_LOADVAL && pRet->nValue>0 ){
       nReq += pRet->nValue;
     }
-    assert( LSM_SHM_CHUNK_SIZE==(1<<15) );
+    assert( LSM_SHM_CHUNK_SIZE==(1<<LSM_SHM_CHUNK_SHIFT) );
     nAvail = LSM_SHM_CHUNK_SIZE - (iPtr & (LSM_SHM_CHUNK_SIZE-1));
 
     if( nAvail<nReq ){

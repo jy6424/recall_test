@@ -476,7 +476,7 @@ static int ckptExportSnapshot(
     ckptSetValue(&ckpt, iOut+1, 0, &rc);
   }
   iOut += 2;
-  assert( iOut<=1024 );
+  assert( iOut<=(LSM_META_PAGE_SIZE / sizeof(u32)) );
 
 #ifdef LSM_LOG_FREELIST
   lsmLogMessage(pDb, rc, 
@@ -646,7 +646,7 @@ int lsmCheckpointLoadLevels(lsm_db *pDb, void *pVal, int nVal){
 ** Return the data for the LEVELS record.
 **
 ** The size of the checkpoint that can be stored in the database header
-** must not exceed 1024 32-bit integers. Normally, it does not. However,
+** must not exceed the meta-page size. Normally, it does not. However,
 ** if it does, part of the checkpoint must be stored in the LSM. This
 ** routine returns that part.
 */
