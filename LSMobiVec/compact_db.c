@@ -441,12 +441,12 @@ int main(int argc, char **argv){
   fprintf(stderr, "DB: %s\n", zDb);
   fprintf(stderr, "Compression: %s\n", zCompression);
   printInfo(pDb, pEnv, LSM_INFO_DB_STRUCTURE, "Before");
-  printInfo(pDb, pEnv, LSM_INFO_FREELIST, "Freelist before");
+  printInfo(pDb, pEnv, LSM_INFO_FREELIST, "In-file freelist before");
 
   rc = runReclaimOnly(pDb);
 
   printInfo(pDb, pEnv, LSM_INFO_DB_STRUCTURE, "Final");
-  printInfo(pDb, pEnv, LSM_INFO_FREELIST, "Freelist final");
+  printInfo(pDb, pEnv, LSM_INFO_FREELIST, "In-file freelist final");
 
   if( lsm_close(pDb)!=LSM_OK && rc==LSM_OK ){
     rc = LSM_ERROR;

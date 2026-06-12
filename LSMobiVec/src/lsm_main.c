@@ -492,9 +492,18 @@ int lsmStructList(
   return rc;
 }
 
+typedef struct InfoFreelistCtx InfoFreelistCtx;
+struct InfoFreelistCtx {
+  LsmString *pStr;
+  int nBlock;
+};
+
 static int infoFreelistCb(void *pCtx, int iBlk, i64 iSnapshot){
-  LsmString *pStr = (LsmString *)pCtx;
-  lsmStringAppendf(pStr, "%s{%d %lld}", (pStr->n?" ":""), iBlk, iSnapshot);
+  InfoFreelistCtx *p = (InfoFreelistCtx *)pCtx;
+  LsmString *pStr = p->pStr;
+  if( iBlk<=p->nBlock ){
+    lsmStringAppendf(pStr, "%s{%d %lld}", (pStr->n?" ":""), iBlk, iSnapshot);
+  }
   return 0;
 }
 
@@ -502,6 +511,7 @@ int lsmInfoFreelist(lsm_db *pDb, char **pzOut){
   Snapshot *pWorker;              /* Worker snapshot */
   int bUnlock = 0;
   LsmString s;
+  InfoFreelistCtx ctx;
   int rc;
 
   /* Obtain the worker snapshot */
@@ -509,7 +519,9 @@ int lsmInfoFreelist(lsm_db *pDb, char **pzOut){
   if( rc!=LSM_OK ) return rc;
 
   lsmStringInit(&s, pDb->pEnv);
-  rc = lsmWalkFreelist(pDb, 0, infoFreelistCb, &s);
+  ctx.pStr = &s;
+  ctx.nBlock = pWorker->nBlock;
+  rc = lsmWalkFreelist(pDb, 0, infoFreelistCb, &ctx);
   if( rc!=LSM_OK ){
     lsmFree(pDb->pEnv, s.z);
   }else{
