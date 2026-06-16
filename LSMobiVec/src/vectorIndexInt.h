@@ -49,6 +49,12 @@ struct DiskAnnIndex {
   double totalBuildWriteMs;  /* index build write I/O */
   double totalBuildDistMs;   /* index build distance compute */
   double totalBuildLsmMs;    /* LSM work during index build */
+  long long totalPass2Visited;       /* existing nodes considered for rewrite */
+  long long totalPass2EdgeUpdates;   /* existing nodes whose edge list changed */
+  long long totalExistingFlushes;    /* flushes of existing node blobs */
+  long long totalExistingFlushBytes; /* bytes flushed for existing node blobs */
+  long long totalNewFlushes;         /* flushes of newly inserted node blobs */
+  long long totalNewFlushBytes;      /* bytes flushed for newly inserted node blobs */
 };
 
 /*

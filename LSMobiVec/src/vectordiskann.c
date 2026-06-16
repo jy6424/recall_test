@@ -1784,10 +1784,12 @@ int diskAnnInsert(
       int iReplace;
       float nodeToNew;
 
+      pIndex->totalPass2Visited++;
       iReplace = diskAnnReplaceEdgeIdx(pIndex, pVisited->pBlobSpot, nNewRowid, &vInsert, &vCandidate, &nodeToNew);
       if( iReplace == -1 ){
         continue;
       }
+      pIndex->totalPass2EdgeUpdates++;
       nodeBinReplaceEdge(pIndex, pVisited->pBlobSpot, iReplace, nNewRowid, nodeToNew, vInsert.pEdge);
       diskAnnPruneEdges(pIndex, pVisited->pBlobSpot, iReplace, &vCandidate);
 
@@ -1796,6 +1798,8 @@ int diskAnnInsert(
         *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): failed to flush blob");
         goto out;
       }
+      pIndex->totalExistingFlushes++;
+      pIndex->totalExistingFlushBytes += pVisited->pBlobSpot->nBufferSize;
     }
     clock_gettime(CLOCK_MONOTONIC, &_p2b);
     pIndex->totalPass2Ms += (_p2b.tv_sec - _p2a.tv_sec)*1000.0
@@ -1818,6 +1822,8 @@ out:
     if( rc != SQLITE4_OK ){
       *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): failed to flush blob");
     }else{
+      pIndex->totalNewFlushes++;
+      pIndex->totalNewFlushBytes += pBlobSpot->nBufferSize;
       buildReadMs += g_totalKvReadMs - buildReadStart;
       buildWriteMs += g_totalKvWriteMs - buildWriteStart;
       buildDistMs += g_buildDistanceMs - buildDistStart;
@@ -2055,6 +2061,12 @@ static double g_totalBuildReadMs = 0;
 static double g_totalBuildWriteMs = 0;
 static double g_totalBuildDistMs = 0;
 static double g_totalBuildLsmMs = 0;
+static long long g_totalPass2Visited = 0;
+static long long g_totalPass2EdgeUpdates = 0;
+static long long g_totalExistingFlushes = 0;
+static long long g_totalExistingFlushBytes = 0;
+static long long g_totalNewFlushes = 0;
+static long long g_totalNewFlushBytes = 0;
 static int g_totalInsertCount = 0;
 static int g_atexitRegistered = 0;
 
@@ -2093,6 +2105,20 @@ static void diskAnnPrintInsertStats(void){
     fprintf(stderr, "    build write I/O:%6.1f ms\n", g_totalBuildWriteMs);
     fprintf(stderr, "    build distance:%7.1f ms\n", g_totalBuildDistMs);
     fprintf(stderr, "    LSM work during build: %.1f ms\n", g_totalBuildLsmMs);
+    fprintf(stderr, "    pass2 visited nodes: %lld  (avg %.2f/insert)\n",
+            g_totalPass2Visited,
+            (double)g_totalPass2Visited / g_totalInsertCount);
+    fprintf(stderr, "    existing edge updates: %lld  (avg %.2f/insert, %.1f%% of visited)\n",
+            g_totalPass2EdgeUpdates,
+            (double)g_totalPass2EdgeUpdates / g_totalInsertCount,
+            g_totalPass2Visited > 0 ? (double)g_totalPass2EdgeUpdates / g_totalPass2Visited * 100.0 : 0.0);
+    fprintf(stderr, "    existing blob flushes: %lld  %.1f MB  (avg %.2f flushes/insert)\n",
+            g_totalExistingFlushes,
+            (double)g_totalExistingFlushBytes / (1024.0 * 1024.0),
+            (double)g_totalExistingFlushes / g_totalInsertCount);
+    fprintf(stderr, "    new blob flushes: %lld  %.1f MB\n",
+            g_totalNewFlushes,
+            (double)g_totalNewFlushBytes / (1024.0 * 1024.0));
     fprintf(stderr, "================================================\n");
   }
 }
@@ -2110,6 +2136,12 @@ void diskAnnCloseIndex(DiskAnnIndex *pIndex){
     g_totalBuildWriteMs += pIndex->totalBuildWriteMs;
     g_totalBuildDistMs += pIndex->totalBuildDistMs;
     g_totalBuildLsmMs += pIndex->totalBuildLsmMs;
+    g_totalPass2Visited += pIndex->totalPass2Visited;
+    g_totalPass2EdgeUpdates += pIndex->totalPass2EdgeUpdates;
+    g_totalExistingFlushes += pIndex->totalExistingFlushes;
+    g_totalExistingFlushBytes += pIndex->totalExistingFlushBytes;
+    g_totalNewFlushes += pIndex->totalNewFlushes;
+    g_totalNewFlushBytes += pIndex->totalNewFlushBytes;
     g_totalInsertCount++;
   }
   if( !g_atexitRegistered ){
