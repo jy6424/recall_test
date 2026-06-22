@@ -570,6 +570,10 @@ int sqlite4VdbeExec(
   u64 start;                 /* CPU clock count at start of opcode */
   int origPc;                /* Program counter at start of opcode */
 #endif
+#ifndef SQLITE4_OMIT_VECTOR
+  int isTableInsertStmt = 0;
+  struct timespec _tis0, _tis1;
+#endif
   /*** INSERT STACK UNION HERE ***/
 
   assert( p->magic==VDBE_MAGIC_RUN );  /* sqlite4_step() verifies this */
@@ -582,6 +586,23 @@ int sqlite4VdbeExec(
   p->rc = SQLITE4_OK;
   assert( p->explain==0 );
   p->pResultSet = 0;
+#ifndef SQLITE4_OMIT_VECTOR
+  if( p->zSql ){
+    const char *z = p->zSql;
+    int ii;
+    while( sqlite4Isspace(*z) ) z++;
+    if( sqlite4_strnicmp(z, "insert", 6)==0 ){
+      isTableInsertStmt = 1;
+      for(ii=0; z[ii]; ii++){
+        if( sqlite4_strnicmp(&z[ii], "_shadow", 7)==0 ){
+          isTableInsertStmt = 0;
+          break;
+        }
+      }
+      if( isTableInsertStmt ) clock_gettime(CLOCK_MONOTONIC, &_tis0);
+    }
+  }
+#endif
   CHECK_FOR_INTERRUPT;
   sqlite4VdbeIOTraceSql(p);
 #ifndef SQLITE4_OMIT_PROGRESS_CALLBACK
@@ -3779,11 +3800,6 @@ case OP_Insert: {
   int nKVKey;
   KVByteArray *pKVKey;
   KVByteArray aKey[24];
-#ifndef SQLITE4_OMIT_VECTOR
-  int isBaseTableInsert = 0;
-  struct timespec _bti0, _bti1;
-#endif
-
 
   pC = p->apCsr[pOp->p1];
   pKey = &aMem[pOp->p3];
@@ -3824,28 +3840,11 @@ case OP_Insert: {
     pKVKey = pKey->z;
   }
 
-#ifndef SQLITE4_OMIT_VECTOR
-  /* Count only writes to the base table cursor. Vector index writes are
-  ** handled above by vectorIndexInsert(), and secondary indexes have
-  ** pKeyInfo set. */
-  isBaseTableInsert = (pC->pKeyInfo == 0);
-  if( isBaseTableInsert ) clock_gettime(CLOCK_MONOTONIC, &_bti0);
-#endif
-
   rc = sqlite4KVStoreReplace(
      pC->pKVCur->pStore,
      (u8 *)pKVKey, nKVKey,
      (u8 *)(pData ? pData->z : 0), (pData ? pData->n : 0)
   );
-#ifndef SQLITE4_OMIT_VECTOR
-  if( isBaseTableInsert ){
-    clock_gettime(CLOCK_MONOTONIC, &_bti1);
-    diskAnnRecordBaseTableInsert(
-      (_bti1.tv_sec - _bti0.tv_sec)*1000.0
-      + (_bti1.tv_nsec - _bti0.tv_nsec)/1e6
-    );
-  }
-#endif
   pC->rowChnged = 1;
 
   break;
@@ -5173,6 +5172,15 @@ vdbe_error_halt:
   ** release the mutexes on btrees that were acquired at the
   ** top. */
 vdbe_return:
+#ifndef SQLITE4_OMIT_VECTOR
+  if( isTableInsertStmt ){
+    clock_gettime(CLOCK_MONOTONIC, &_tis1);
+    diskAnnRecordTableInsertStmt(
+      (_tis1.tv_sec - _tis0.tv_sec)*1000.0
+      + (_tis1.tv_nsec - _tis0.tv_nsec)/1e6
+    );
+  }
+#endif
   return rc;
 
   /* Jump to here if a string or blob larger than SQLITE4_MAX_LENGTH
