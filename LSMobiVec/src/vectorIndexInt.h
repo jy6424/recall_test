@@ -45,8 +45,8 @@ struct DiskAnnIndex {
   double totalPass1Ms;       /* pass1: add edges to new node */
   double totalPass2Ms;       /* pass2: update neighbor edges + their flush */
   double totalNewFlushMs;    /* flush new node's blob */
-  double totalBuildReadMs;   /* index build read I/O */
-  double totalBuildWriteMs;  /* index build write I/O */
+  double totalBuildReadMs;   /* index build KV read path */
+  double totalBuildWriteMs;  /* index build KV write path */
   double totalBuildDistMs;   /* index build distance compute */
   double totalBuildLsmMs;    /* LSM work during index build */
   long long totalPass2Visited;       /* existing nodes considered for rewrite */

@@ -20,6 +20,7 @@
 */
 #include "sqliteInt.h"
 #include "vdbeInt.h"
+#include <time.h>
 #ifdef LIBSQL_ENABLE_WASM_RUNTIME
 #include "ext/udf/wasm_bindings.h"
 #endif
@@ -5770,6 +5771,10 @@ case OP_Insert: {
   const char *zDb;  /* database name - used by the update hook */
   Table *pTab;      /* Table structure - used by update and pre-update hooks */
   BtreePayload x;   /* Payload to be inserted */
+#ifndef SQLITE_OMIT_VECTOR
+  int isBaseTableInsert = 0;
+  struct timespec _bti0, _bti1;
+#endif
 
   pData = &aMem[pOp->p2];
   assert( pOp->p1>=0 && pOp->p1<p->nCursor );
@@ -5831,11 +5836,31 @@ case OP_Insert: {
     x.nZero = 0;
   }
   x.pKey = 0;
+#ifndef SQLITE_OMIT_VECTOR
+  if( pOp->p4type==P4_TABLE && pOp->p4.pTab && pOp->p4.pTab->zName ){
+    const char *zName = pOp->p4.pTab->zName;
+    int nName = sqlite3Strlen30(zName);
+    isBaseTableInsert = (
+        sqlite3_strnicmp(zName, "sqlite_", 7)!=0
+     && (nName<7 || sqlite3_stricmp(&zName[nName-7], "_shadow")!=0)
+    );
+  }
+  if( isBaseTableInsert ) clock_gettime(CLOCK_MONOTONIC, &_bti0);
+#endif
   assert( BTREE_PREFORMAT==OPFLAG_PREFORMAT );
   rc = sqlite3BtreeInsert(pC->uc.pCursor, &x,
       (pOp->p5 & (OPFLAG_APPEND|OPFLAG_SAVEPOSITION|OPFLAG_PREFORMAT)),
       seekResult
   );
+#ifndef SQLITE_OMIT_VECTOR
+  if( isBaseTableInsert ){
+    clock_gettime(CLOCK_MONOTONIC, &_bti1);
+    diskAnnRecordBaseTableInsert(
+        (_bti1.tv_sec - _bti0.tv_sec)*1000.0
+      + (_bti1.tv_nsec - _bti0.tv_nsec)/1e6
+    );
+  }
+#endif
   pC->deferredMoveto = 0;
   pC->cacheStatus = CACHE_STALE;
   colCacheCtr++;

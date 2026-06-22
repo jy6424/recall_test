@@ -51,7 +51,7 @@ static int g_queryCount = 0;
 static double g_queryTotalMs = 0;       /* total wall-clock time */
 static double g_queryGraphMs = 0;       /* graph traversal (diskAnnSearchInternal) */
 static double g_queryResultMs = 0;      /* result collection */
-static double g_queryKvReadMs = 0;      /* KV read I/O during search only */
+static double g_queryKvReadMs = 0;      /* KV read path during search only */
 static int g_queryKvReads = 0;          /* KV read count during search only */
 static int g_queryNodesVisited = 0;     /* total nodes visited across all queries */
 static long long g_queryEdgesExamined = 0; /* total edges examined */
@@ -1566,7 +1566,7 @@ int diskAnnSearch(
 
   clock_gettime(CLOCK_MONOTONIC, &_q0);
 
-  /* Snapshot counters before search to isolate search-only I/O */
+  /* Snapshot counters before search to isolate search-only KV reads */
   kvReadBefore = g_totalKvReadMs;
   kvReadCountBefore = pIndex->nReads;
   visitedBefore = g_searchVisitedTotal;
@@ -2090,7 +2090,7 @@ static void diskAnnPrintSearchStats(void){
             g_queryTotalMs, avgTotal, qps);
     fprintf(stderr, "  graph traversal:%8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             g_queryGraphMs, avgGraph, g_queryGraphMs/g_queryTotalMs*100);
-    fprintf(stderr, "    query read I/O:%7.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
+    fprintf(stderr, "    query KV read path:%7.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
             g_queryKvReadMs, avgKvRead,
             g_queryGraphMs > 0 ? g_queryKvReadMs/g_queryGraphMs*100 : 0);
     fprintf(stderr, "    query distance:%6.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
@@ -2104,16 +2104,18 @@ static void diskAnnPrintSearchStats(void){
 
 static void diskAnnPrintInsertStats(void){
   if( g_totalInsertCount > 0 ){
-    double buildTotal = g_totalSearchMs + g_totalPass1Ms + g_totalPass2Ms + g_totalNewFlushMs;
+    double graphBuild = g_totalSearchMs + g_totalPass1Ms + g_totalPass2Ms + g_totalNewFlushMs;
+    double indexBuildTotal = g_totalShadowInsMs + graphBuild;
     fprintf(stderr, "\n=== diskAnn insert breakdown (%d inserts) ===\n", g_totalInsertCount);
     fprintf(stderr, "  base table insert:   %8.1f ms  (%d ops)\n",
             g_totalBaseTableInsertMs, g_totalBaseTableInsertCount);
-    fprintf(stderr, "  shadow table insert: %8.1f ms\n", g_totalShadowInsMs);
-    fprintf(stderr, "  index build:    %8.1f ms\n", buildTotal);
-    fprintf(stderr, "    build read I/O:%7.1f ms\n", g_totalBuildReadMs);
-    fprintf(stderr, "    build write I/O:%6.1f ms\n", g_totalBuildWriteMs);
+    fprintf(stderr, "  vector index build:  %8.1f ms\n", indexBuildTotal);
+    fprintf(stderr, "    shadow row insert: %8.1f ms\n", g_totalShadowInsMs);
+    fprintf(stderr, "    graph build/update:%8.1f ms\n", graphBuild);
+    fprintf(stderr, "    build KV read path:%7.1f ms\n", g_totalBuildReadMs);
+    fprintf(stderr, "    build KV write path:%6.1f ms\n", g_totalBuildWriteMs);
     fprintf(stderr, "    build distance:%7.1f ms\n", g_totalBuildDistMs);
-    fprintf(stderr, "    LSM work during build: %.1f ms\n", g_totalBuildLsmMs);
+    fprintf(stderr, "    LSM autowork during build: %.1f ms\n", g_totalBuildLsmMs);
     fprintf(stderr, "    pass2 visited nodes: %lld  (avg %.2f/insert)\n",
             g_totalPass2Visited,
             (double)g_totalPass2Visited / g_totalInsertCount);

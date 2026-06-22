@@ -61,6 +61,7 @@ int blobSpotCreate(const DiskAnnIndex *pIndex, BlobSpot **ppBlobSpot, u64 nRowid
 int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, int nBufferSize);
 int blobSpotFlush(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot);
 void blobSpotFree(BlobSpot *pBlobSpot);
+void diskAnnRecordBaseTableInsert(double ms);
 
 /*
  * Accessor for node binary format
@@ -256,4 +257,3 @@ int vectorIndexDelete(VectorIdxCursor *, const UnpackedRecord *, char **);
 #endif
 
 #endif /* _VECTOR_INDEX_H */
-

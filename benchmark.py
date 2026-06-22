@@ -504,14 +504,24 @@ def parse_diskann_stats(stderr_text):
             stats[key] = conv(m.group(1))
 
     # Insert breakdown
+    grab(r'base table insert:\s*([\d.]+)\s+ms', 'table_insert_ms')
     grab(r'table insert:\s*([\d.]+)\s+ms', 'table_insert_ms')
+    grab(r'shadow (?:row|table) insert:\s*([\d.]+)\s+ms', 'shadow_insert_ms')
+    grab(r'vector index build:\s*([\d.]+)\s+ms', 'build_total_ms')
     grab(r'index build:\s*([\d.]+)\s+ms', 'build_total_ms')
+    grab(r'graph build/update:\s*([\d.]+)\s+ms', 'graph_build_ms')
+    grab(r'build KV read path:\s*([\d.]+)\s+ms', 'build_read_ms')
+    grab(r'build blob read path:\s*([\d.]+)\s+ms', 'build_read_ms')
     grab(r'build read I/O:\s*([\d.]+)\s+ms', 'build_read_ms')
+    grab(r'build KV write path:\s*([\d.]+)\s+ms', 'build_write_ms')
+    grab(r'build blob write path:\s*([\d.]+)\s+ms', 'build_write_ms')
     grab(r'build write I/O:\s*([\d.]+)\s+ms', 'build_write_ms')
     grab(r'build distance:\s*([\d.]+)\s+ms', 'build_dist_ms')
-    grab(r'LSM work during build:\s*([\d.]+)\s+ms', 'build_lsm_ms')
+    grab(r'LSM (?:autowork|work) during build:\s*([\d.]+)\s+ms', 'build_lsm_ms')
     # Query stats
     grab(r'graph traversal:\s*([\d.]+)\s+ms', 'graph_ms')
+    grab(r'query KV read path:\s*([\d.]+)\s+ms', 'query_read_ms')
+    grab(r'query blob read path:\s*([\d.]+)\s+ms', 'query_read_ms')
     grab(r'query read I/O:\s*([\d.]+)\s+ms', 'query_read_ms')
     grab(r'query distance:\s*([\d.]+)\s+ms', 'query_dist_ms')
     grab(r'result collect:\s*([\d.]+)\s+ms', 'result_ms')
@@ -631,14 +641,16 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     if ins_stats.get('build_total_ms') is not None:
         table_s = ins_stats.get('table_insert_ms', 0) / 1000
         build_s = ins_stats.get('build_total_ms', 0) / 1000
+        shadow_s = ins_stats.get('shadow_insert_ms', 0) / 1000
+        graph_s = ins_stats.get('graph_build_ms', 0) / 1000
         read_s = ins_stats.get('build_read_ms', 0) / 1000
         write_s = ins_stats.get('build_write_ms', 0) / 1000
         dist_s = ins_stats.get('build_dist_ms', 0) / 1000
         lsm_s = ins_stats.get('build_lsm_ms', 0) / 1000
         print(
-            f"        TableIns={table_s:.1f}s  "
-            f"IndexBuild={build_s:.1f}s  BuildRead={read_s:.1f}s  "
-            f"BuildWrite={write_s:.1f}s  BuildDist={dist_s:.1f}s  "
+            f"        BaseTbl={table_s:.1f}s  VecBuild={build_s:.1f}s  "
+            f"Shadow={shadow_s:.1f}s  GraphBuild={graph_s:.1f}s  "
+            f"ReadPath={read_s:.1f}s  WritePath={write_s:.1f}s  Dist={dist_s:.1f}s  "
             f"LSMWork={lsm_s:.1f}s"
         )
     print(f"        {format_io_summary(result['insert_disk_io'])}")
@@ -715,7 +727,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     if q_stats.get('graph_ms'):
         print(
             f"        Graph={q_stats.get('graph_ms', 0):.0f}ms  "
-            f"QueryRead={q_stats.get('query_read_ms', 0):.0f}ms  "
+            f"ReadPath={q_stats.get('query_read_ms', 0):.0f}ms  "
             f"QueryDist={q_stats.get('query_dist_ms', 0):.0f}ms  "
             f"Result={q_stats.get('result_ms', 0):.0f}ms"
         )
@@ -880,15 +892,15 @@ def main():
     show_compact = use_compaction
     for ds_name, ds_results in all_results.items():
         ins_hdr = (
-            f"{'Overall':>8} {'Table':>8} {'Build':>8} {'ReadIO':>8} "
-            f"{'WriteIO':>8} {'Dist':>8} {'LSM':>8}"
+            f"{'Overall':>8} {'BaseTbl':>8} {'VecBuild':>8} {'ReadPath':>8} "
+            f"{'WritePath':>9} {'Dist':>8} {'LSM':>8}"
         )
-        ins_sub = f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8}"
+        ins_sub = f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>9} {'(s)':>8} {'(s)':>8}"
         if show_compact:
             ins_hdr += f" {'Compact':>8}"
             ins_sub += f" {'(s)':>8}"
         q_hdr = (
-            f"{'Overall':>8} {'Graph':>8} {'ReadIO':>8} {'Dist':>8} "
+            f"{'Overall':>8} {'Graph':>8} {'ReadPath':>8} {'Dist':>8} "
             f"{'Result':>8} {'Q/s':>8} {'Recall':>8}"
         )
         q_sub = f"{'(s)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} {'':>8} {'@k':>8}"
@@ -916,7 +928,7 @@ def main():
             qst = r.get('q_stats', {})
             ins_vals = (f"{r['insert_time_s']:>8.1f} "
                         f"{table_s:>8.1f} {build_s:>8.1f} {read_s:>8.1f} "
-                        f"{write_s:>8.1f} {dist_s:>8.1f} {lsm_s:>8.1f}")
+                        f"{write_s:>9.1f} {dist_s:>8.1f} {lsm_s:>8.1f}")
             if show_compact:
                 compact_str = f"{r['compact_time_s']:>8.1f}" if r['compact_time_s'] > 0 else f"{'---':>8}"
                 ins_vals += f" {compact_str}"

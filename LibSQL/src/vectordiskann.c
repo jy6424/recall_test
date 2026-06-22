@@ -59,6 +59,7 @@
 /* Per-operation I/O timing (accumulated in blobSpot functions) */
 static double g_totalBlobReadMs;
 static double g_totalBlobWriteMs;
+static double g_totalBaseTableInsertMs;
 static int g_searchVisitedTotal;
 static long long g_searchEdgesTotal;
 
@@ -69,6 +70,7 @@ static double g_totalPass1Ms;
 static double g_totalPass2Ms;
 static double g_totalFlushMs;
 static int g_totalInsertCount;
+static int g_totalBaseTableInsertCount;
 static int g_atexitRegistered;
 
 /* Search-specific stats */
@@ -1960,7 +1962,7 @@ static void diskAnnPrintSearchStats(void){
             g_queryTotalMs, avgTotal, qps);
     fprintf(stderr, "  graph traversal:%8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             g_queryGraphMs, avgGraph, g_queryGraphMs/g_queryTotalMs*100);
-    fprintf(stderr, "    query read I/O:%7.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
+    fprintf(stderr, "    query blob read path:%7.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
             g_queryBlobReadMs, avgBlobRead,
             g_queryGraphMs > 0 ? g_queryBlobReadMs/g_queryGraphMs*100 : 0);
     fprintf(stderr, "    query distance:%6.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
@@ -1972,14 +1974,23 @@ static void diskAnnPrintSearchStats(void){
   }
 }
 
+void diskAnnRecordBaseTableInsert(double ms){
+  g_totalBaseTableInsertMs += ms;
+  g_totalBaseTableInsertCount++;
+}
+
 static void diskAnnPrintInsertStats(void){
   if( g_totalInsertCount > 0 ){
-    double buildTotal = g_totalSearchMs + g_totalPass1Ms + g_totalPass2Ms + g_totalFlushMs;
+    double graphBuild = g_totalSearchMs + g_totalPass1Ms + g_totalPass2Ms + g_totalFlushMs;
+    double indexBuildTotal = g_totalShadowInsMs + graphBuild;
     fprintf(stderr, "\n=== diskAnn insert breakdown (%d inserts) ===\n", g_totalInsertCount);
-    fprintf(stderr, "  table insert:   %8.1f ms\n", g_totalShadowInsMs);
-    fprintf(stderr, "  index build:    %8.1f ms\n", buildTotal);
-    fprintf(stderr, "    build read I/O:%7.1f ms\n", g_totalBuildReadMs);
-    fprintf(stderr, "    build write I/O:%6.1f ms\n", g_totalBuildWriteMs);
+    fprintf(stderr, "  base table insert:   %8.1f ms  (%d ops)\n",
+            g_totalBaseTableInsertMs, g_totalBaseTableInsertCount);
+    fprintf(stderr, "  vector index build:  %8.1f ms\n", indexBuildTotal);
+    fprintf(stderr, "    shadow row insert: %8.1f ms\n", g_totalShadowInsMs);
+    fprintf(stderr, "    graph build/update:%8.1f ms\n", graphBuild);
+    fprintf(stderr, "    build blob read path:%7.1f ms\n", g_totalBuildReadMs);
+    fprintf(stderr, "    build blob write path:%6.1f ms\n", g_totalBuildWriteMs);
     fprintf(stderr, "    build distance:%7.1f ms\n", g_totalBuildDistMs);
     fprintf(stderr, "    LSM work during build: 0.0 ms\n");
     fprintf(stderr, "================================================\n");
