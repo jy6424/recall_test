@@ -2057,10 +2057,12 @@ static double g_totalShadowInsMs = 0;
 static double g_totalPass1Ms = 0;
 static double g_totalPass2Ms = 0;
 static double g_totalNewFlushMs = 0;
+static double g_totalBaseTableInsertMs = 0;
 static double g_totalBuildReadMs = 0;
 static double g_totalBuildWriteMs = 0;
 static double g_totalBuildDistMs = 0;
 static double g_totalBuildLsmMs = 0;
+static int g_totalBaseTableInsertCount = 0;
 static long long g_totalPass2Visited = 0;
 static long long g_totalPass2EdgeUpdates = 0;
 static long long g_totalExistingFlushes = 0;
@@ -2069,6 +2071,11 @@ static long long g_totalNewFlushes = 0;
 static long long g_totalNewFlushBytes = 0;
 static int g_totalInsertCount = 0;
 static int g_atexitRegistered = 0;
+
+void diskAnnRecordBaseTableInsert(double ms){
+  g_totalBaseTableInsertMs += ms;
+  g_totalBaseTableInsertCount++;
+}
 
 static void diskAnnPrintSearchStats(void){
   if( g_queryCount > 0 ){
@@ -2099,7 +2106,9 @@ static void diskAnnPrintInsertStats(void){
   if( g_totalInsertCount > 0 ){
     double buildTotal = g_totalSearchMs + g_totalPass1Ms + g_totalPass2Ms + g_totalNewFlushMs;
     fprintf(stderr, "\n=== diskAnn insert breakdown (%d inserts) ===\n", g_totalInsertCount);
-    fprintf(stderr, "  table insert:   %8.1f ms\n", g_totalShadowInsMs);
+    fprintf(stderr, "  base table insert:   %8.1f ms  (%d ops)\n",
+            g_totalBaseTableInsertMs, g_totalBaseTableInsertCount);
+    fprintf(stderr, "  shadow table insert: %8.1f ms\n", g_totalShadowInsMs);
     fprintf(stderr, "  index build:    %8.1f ms\n", buildTotal);
     fprintf(stderr, "    build read I/O:%7.1f ms\n", g_totalBuildReadMs);
     fprintf(stderr, "    build write I/O:%6.1f ms\n", g_totalBuildWriteMs);

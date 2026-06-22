@@ -3778,6 +3778,10 @@ case OP_Insert: {
   int nKVKey;
   KVByteArray *pKVKey;
   KVByteArray aKey[24];
+#ifndef SQLITE4_OMIT_VECTOR
+  int isBaseTableInsert = 0;
+  struct timespec _bti0, _bti1;
+#endif
 
 
   pC = p->apCsr[pOp->p1];
@@ -3819,12 +3823,28 @@ case OP_Insert: {
     pKVKey = pKey->z;
   }
 
+#ifndef SQLITE4_OMIT_VECTOR
+  /* Count only writes to the base table cursor. Vector index writes are
+  ** handled above by vectorIndexInsert(), and secondary indexes have
+  ** pKeyInfo set. */
+  isBaseTableInsert = (pC->pKeyInfo == 0);
+  if( isBaseTableInsert ) clock_gettime(CLOCK_MONOTONIC, &_bti0);
+#endif
 
   rc = sqlite4KVStoreReplace(
      pC->pKVCur->pStore,
      (u8 *)pKVKey, nKVKey,
      (u8 *)(pData ? pData->z : 0), (pData ? pData->n : 0)
   );
+#ifndef SQLITE4_OMIT_VECTOR
+  if( isBaseTableInsert ){
+    clock_gettime(CLOCK_MONOTONIC, &_bti1);
+    diskAnnRecordBaseTableInsert(
+      (_bti1.tv_sec - _bti0.tv_sec)*1000.0
+      + (_bti1.tv_nsec - _bti0.tv_nsec)/1e6
+    );
+  }
+#endif
   pC->rowChnged = 1;
 
   break;
