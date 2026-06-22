@@ -45,6 +45,7 @@
 */
 #include "sqliteInt.h"
 #include "vdbeInt.h"
+#include <time.h>
 
 #ifndef SQLITE4_OMIT_VECTOR
 #include "vectorIndexInt.h"
