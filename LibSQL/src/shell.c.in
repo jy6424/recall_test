@@ -5473,7 +5473,12 @@ static void open_db(ShellState *p, int openFlags){
 ** Attempt to close the database connection.  Report errors.
 */
 void close_db(sqlite3 *db){
-  int rc = sqlite3_close(db);
+  sqlite3_int64 t0;
+  int rc;
+  if( db==0 ) return;
+  t0 = timeOfDay();
+  rc = sqlite3_close(db);
+  eputf("shell db close: %.1f ms\n", (double)(timeOfDay() - t0));
   if( rc ){
     eputf("Error: sqlite3_close() returns %d: %s\n", rc, sqlite3_errmsg(db));
   }
