@@ -61,6 +61,7 @@ static double g_totalBlobReadMs;
 static double g_totalBlobWriteMs;
 static double g_totalInsertStmtMs;
 static double g_totalInsertOtherMs;
+static double g_totalInsertFinishMs;
 static int g_searchVisitedTotal;
 static long long g_searchEdgesTotal;
 
@@ -1986,6 +1987,10 @@ void diskAnnRecordInsertOther(double ms){
   g_totalInsertOtherMs += ms;
 }
 
+void diskAnnRecordInsertFinish(double ms){
+  g_totalInsertFinishMs += ms;
+}
+
 void diskAnnRecordIndexBuildTotal(double ms){
   g_totalIndexBuildMs += ms;
   g_totalIndexBuildCount++;
@@ -2000,6 +2005,7 @@ static void diskAnnPrintInsertStats(void){
     fprintf(stderr, "  insert statement total:%7.1f ms  (%d stmts)\n",
             g_totalInsertStmtMs, g_totalInsertStmtCount);
     fprintf(stderr, "  VDBE work:         %8.1f ms\n", g_totalInsertOtherMs);
+    fprintf(stderr, "  statement finish:  %8.1f ms\n", g_totalInsertFinishMs);
     fprintf(stderr, "  vector index build:  %8.1f ms  (%d ops)\n",
             indexBuildTotal, g_totalIndexBuildCount);
     fprintf(stderr, "    diskAnn core build:%8.1f ms\n", diskAnnCoreBuild);

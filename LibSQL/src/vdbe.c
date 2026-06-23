@@ -870,6 +870,7 @@ int sqlite3VdbeExec(
   int isInsertStmt = 0;
   double insertStmtStartMs = 0;
   double insertOtherMs = 0;
+  double insertFinishMs = 0;
   double insertOpStartMs = 0;
   int isVectorInsertOp = 0;
 #endif
@@ -1367,6 +1368,13 @@ case OP_Halt: {
     pcx = (int)(pOp - aOp);
     sqlite3_log(pOp->p1, "abort at %d in [%s]: %s", pcx, p->zSql, p->zErrMsg);
   }
+#ifndef SQLITE_OMIT_VECTOR
+  if( isInsertStmt ){
+    double finishStartMs = diskAnnVdbeNowMs();
+    rc = sqlite3VdbeHalt(p);
+    insertFinishMs += diskAnnVdbeNowMs() - finishStartMs;
+  }else
+#endif
   rc = sqlite3VdbeHalt(p);
   assert( rc==SQLITE_BUSY || rc==SQLITE_OK || rc==SQLITE_ERROR );
   if( rc==SQLITE_BUSY ){
@@ -9335,7 +9343,16 @@ abort_due_to_error:
   testcase( sqlite3GlobalConfig.xLog!=0 );
   sqlite3_log(rc, "statement aborts at %d: [%s] %s",
                    (int)(pOp - aOp), p->zSql, p->zErrMsg);
-  if( p->eVdbeState==VDBE_RUN_STATE ) sqlite3VdbeHalt(p);
+  if( p->eVdbeState==VDBE_RUN_STATE ){
+#ifndef SQLITE_OMIT_VECTOR
+    if( isInsertStmt ){
+      double finishStartMs = diskAnnVdbeNowMs();
+      sqlite3VdbeHalt(p);
+      insertFinishMs += diskAnnVdbeNowMs() - finishStartMs;
+    }else
+#endif
+    sqlite3VdbeHalt(p);
+  }
   if( rc==SQLITE_IOERR_NOMEM ) sqlite3OomFault(db);
   if( rc==SQLITE_CORRUPT && db->autoCommit==0 ){
     db->flags |= SQLITE_CorruptRdOnly;
@@ -9379,6 +9396,7 @@ vdbe_return:
   if( isInsertStmt ){
     diskAnnRecordInsertStmt(diskAnnVdbeNowMs() - insertStmtStartMs);
     diskAnnRecordInsertOther(insertOtherMs);
+    diskAnnRecordInsertFinish(insertFinishMs);
   }
 #endif
   assert( rc!=SQLITE_OK || nExtraDelete==0

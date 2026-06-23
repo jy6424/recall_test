@@ -83,6 +83,7 @@ int blobSpotFlush(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot);
 void blobSpotFree(BlobSpot *pBlobSpot);
 void diskAnnRecordInsertStmt(double ms);
 void diskAnnRecordInsertOther(double ms);
+void diskAnnRecordInsertFinish(double ms);
 void diskAnnRecordIndexBuildTotal(double ms);
 
 /*

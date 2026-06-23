@@ -580,6 +580,7 @@ int sqlite4VdbeExec(
   int isInsertStmt = 0;
   double insertStmtStartMs = 0;
   double insertOtherMs = 0;
+  double insertFinishMs = 0;
   double insertOpStartMs = 0;
   int isVectorInsertOp = 0;
 #endif
@@ -902,6 +903,13 @@ case OP_Halt: {
     sqlite4_log(db->pEnv, pOp->p1,
                 "constraint failed at %d in [%s]", pc, p->zSql);
   }
+#ifndef SQLITE4_OMIT_VECTOR
+  if( isInsertStmt ){
+    double finishStartMs = diskAnnVdbeNowMs();
+    rc = sqlite4VdbeHalt(p);
+    insertFinishMs += diskAnnVdbeNowMs() - finishStartMs;
+  }else
+#endif
   rc = sqlite4VdbeHalt(p);
   assert( rc==SQLITE4_BUSY || rc==SQLITE4_OK || rc==SQLITE4_ERROR );
   if( rc==SQLITE4_BUSY ){
@@ -5193,6 +5201,13 @@ vdbe_error_halt:
   testcase( sqlite4DefaultEnv.xLog!=0 );
   sqlite4_log(db->pEnv, rc, "statement aborts at %d: [%s] %s", 
                    pc, p->zSql, p->zErrMsg);
+#ifndef SQLITE4_OMIT_VECTOR
+  if( isInsertStmt ){
+    double finishStartMs = diskAnnVdbeNowMs();
+    sqlite4VdbeHalt(p);
+    insertFinishMs += diskAnnVdbeNowMs() - finishStartMs;
+  }else
+#endif
   sqlite4VdbeHalt(p);
   if( rc==SQLITE4_IOERR_NOMEM ) db->mallocFailed = 1;
   rc = SQLITE4_ERROR;
@@ -5208,6 +5223,7 @@ vdbe_return:
   if( isInsertStmt ){
     diskAnnRecordInsertStmt(diskAnnVdbeNowMs() - insertStmtStartMs);
     diskAnnRecordInsertOther(insertOtherMs);
+    diskAnnRecordInsertFinish(insertFinishMs);
   }
 #endif
   return rc;
