@@ -514,6 +514,22 @@ def parse_diskann_stats(stderr_text):
     grab(r'shell step:\s*([\d.]+)\s+ms', 'shell_step_ms')
     grab(r'shell finalize:\s*([\d.]+)\s+ms', 'shell_finalize_ms')
     grab(r'shell other:\s*([\d.]+)\s+ms', 'shell_other_ms')
+    grab(r'step top-level calls:\s*(\d+)', 'step_top_count', int)
+    grab(r'step api total:\s*([\d.]+)\s+ms', 'step_api_ms')
+    grab(r'step core total:\s*([\d.]+)\s+ms', 'step_core_ms')
+    grab(r'step mutex enter:\s*([\d.]+)\s+ms', 'step_mutex_enter_ms')
+    grab(r'step mutex leave:\s*([\d.]+)\s+ms', 'step_mutex_leave_ms')
+    grab(r'step auto reset:\s*([\d.]+)\s+ms', 'step_auto_reset_ms')
+    grab(r'step ready setup:\s*([\d.]+)\s+ms', 'step_ready_ms')
+    grab(r'step vdbe list:\s*([\d.]+)\s+ms', 'step_vdbe_list_ms')
+    grab(r'step vdbe exec:\s*([\d.]+)\s+ms', 'step_vdbe_exec_ms')
+    grab(r'step profile:\s*([\d.]+)\s+ms', 'step_profile_ms')
+    grab(r'step wal callback:\s*([\d.]+)\s+ms', 'step_wal_ms')
+    grab(r'step transfer error:\s*([\d.]+)\s+ms', 'step_transfer_ms')
+    grab(r'step api exit:\s*([\d.]+)\s+ms', 'step_api_exit_ms')
+    grab(r'step reprepare:\s*([\d.]+)\s+ms', 'step_reprepare_ms')
+    grab(r'step reset:\s*([\d.]+)\s+ms', 'step_reset_ms')
+    grab(r'step wrapper other:\s*([\d.]+)\s+ms', 'step_wrapper_other_ms')
     grab(r'non-index insert remainder:\s*([\d.]+)\s+ms', 'non_index_insert_ms')
     grab(r'base table insert:\s*([\d.]+)\s+ms', 'non_index_insert_ms')
     grab(r'table insert:\s*([\d.]+)\s+ms', 'non_index_insert_ms')
@@ -679,6 +695,25 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
             f"ReadPath={read_s:.1f}s  WritePath={write_s:.1f}s  Dist={dist_s:.1f}s  "
             f"LSMWork={lsm_s:.1f}s"
         )
+        if ins_stats.get('step_api_ms') is not None:
+            print(
+                f"        StepApi={ins_stats.get('step_api_ms', 0)/1000:.1f}s  "
+                f"StepCore={ins_stats.get('step_core_ms', 0)/1000:.1f}s  "
+                f"StepExec={ins_stats.get('step_vdbe_exec_ms', 0)/1000:.1f}s  "
+                f"StepReady={ins_stats.get('step_ready_ms', 0)/1000:.1f}s  "
+                f"StepAutoReset={ins_stats.get('step_auto_reset_ms', 0)/1000:.1f}s  "
+                f"StepReset={ins_stats.get('step_reset_ms', 0)/1000:.1f}s  "
+                f"StepReprep={ins_stats.get('step_reprepare_ms', 0)/1000:.1f}s"
+            )
+            print(
+                f"        StepMutex={ins_stats.get('step_mutex_enter_ms', 0)/1000:.1f}s/"
+                f"{ins_stats.get('step_mutex_leave_ms', 0)/1000:.1f}s  "
+                f"StepProfile={ins_stats.get('step_profile_ms', 0)/1000:.1f}s  "
+                f"StepWal={ins_stats.get('step_wal_ms', 0)/1000:.1f}s  "
+                f"StepXfer={ins_stats.get('step_transfer_ms', 0)/1000:.1f}s  "
+                f"StepApiExit={ins_stats.get('step_api_exit_ms', 0)/1000:.1f}s  "
+                f"StepOther={ins_stats.get('step_wrapper_other_ms', 0)/1000:.1f}s"
+            )
     print(f"        {format_io_summary(result['insert_disk_io'])}")
     for block in extract_c_stat_blocks(ins_err):
         print(block)

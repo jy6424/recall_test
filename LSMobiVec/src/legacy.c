@@ -30,6 +30,8 @@ static double gShellStepMs = 0.0;
 static double gShellFinalizeMs = 0.0;
 static int gShellStmtCount = 0;
 
+extern void sqlite4_step_timing_report(void);
+
 void sqlite4_shell_timing_report(void){
   double shellOtherMs = gShellExecMs - gShellPrepareMs - gShellStepMs - gShellFinalizeMs;
   if( shellOtherMs<0.0 ) shellOtherMs = 0.0;
@@ -38,6 +40,7 @@ void sqlite4_shell_timing_report(void){
   fprintf(stderr, "shell step: %.1f ms\n", gShellStepMs);
   fprintf(stderr, "shell finalize: %.1f ms\n", gShellFinalizeMs);
   fprintf(stderr, "shell other: %.1f ms\n", shellOtherMs);
+  sqlite4_step_timing_report();
 }
 
 /*

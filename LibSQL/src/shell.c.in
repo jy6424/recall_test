@@ -325,6 +325,8 @@ static double gShellStepMs = 0.0;
 static double gShellFinalizeMs = 0.0;
 static int gShellStmtCount = 0;
 
+extern void sqlite3_step_timing_report(void);
+
 #if !defined(_WIN32) && !defined(WIN32) && !defined(__minux)
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -5501,6 +5503,7 @@ void close_db(sqlite3 *db){
   eputf("shell step: %.1f ms\n", gShellStepMs);
   eputf("shell finalize: %.1f ms\n", gShellFinalizeMs);
   eputf("shell other: %.1f ms\n", shellOtherMs);
+  sqlite3_step_timing_report();
   eputf("shell db close: %.1f ms\n", (double)(timeOfDay() - t0));
   if( rc ){
     eputf("Error: sqlite3_close() returns %d: %s\n", rc, sqlite3_errmsg(db));
