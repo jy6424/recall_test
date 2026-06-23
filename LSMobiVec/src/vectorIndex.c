@@ -29,6 +29,7 @@
 #include "sqliteInt.h"
 #include "vdbeInt.h"
 #include "vectorIndexInt.h"
+#include <time.h>
 
 /**************************************************************************
 ** VectorIdxParams utilities
@@ -1000,17 +1001,35 @@ int vectorIndexInsert(
 ){
   int rc;
   VectorInRow vectorInRow;
+  struct timespec _vi0, _vi1;
 
+  clock_gettime(CLOCK_MONOTONIC, &_vi0);
   rc = vectorInRowAlloc(pCur->db, rowid, pVector, &vectorInRow, pzErrMsg);
   if( rc != SQLITE4_OK ){
+    clock_gettime(CLOCK_MONOTONIC, &_vi1);
+    diskAnnRecordIndexBuildTotal(
+      (_vi1.tv_sec - _vi0.tv_sec)*1000.0
+      + (_vi1.tv_nsec - _vi0.tv_nsec)/1e6
+    );
     return rc;
   }
   if( vectorInRow.pVector == NULL ){
     /* NULL vector - skip insertion */
+    vectorInRowFree(pCur->db, &vectorInRow);
+    clock_gettime(CLOCK_MONOTONIC, &_vi1);
+    diskAnnRecordIndexBuildTotal(
+      (_vi1.tv_sec - _vi0.tv_sec)*1000.0
+      + (_vi1.tv_nsec - _vi0.tv_nsec)/1e6
+    );
     return SQLITE4_OK;
   }
   rc = diskAnnInsert(pCur->pIndex, &vectorInRow, pzErrMsg);
   vectorInRowFree(pCur->db, &vectorInRow);
+  clock_gettime(CLOCK_MONOTONIC, &_vi1);
+  diskAnnRecordIndexBuildTotal(
+    (_vi1.tv_sec - _vi0.tv_sec)*1000.0
+    + (_vi1.tv_nsec - _vi0.tv_nsec)/1e6
+  );
   return rc;
 }
 

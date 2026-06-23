@@ -69,8 +69,10 @@ static double g_totalShadowInsMs;
 static double g_totalPass1Ms;
 static double g_totalPass2Ms;
 static double g_totalFlushMs;
+static double g_totalIndexBuildMs;
 static int g_totalInsertCount;
 static int g_totalTableInsertCount;
+static int g_totalIndexBuildCount;
 static int g_atexitRegistered;
 
 /* Search-specific stats */
@@ -1979,14 +1981,22 @@ void diskAnnRecordTableInsert(double ms){
   g_totalTableInsertCount++;
 }
 
+void diskAnnRecordIndexBuildTotal(double ms){
+  g_totalIndexBuildMs += ms;
+  g_totalIndexBuildCount++;
+}
+
 static void diskAnnPrintInsertStats(void){
   if( g_totalInsertCount > 0 ){
     double graphBuild = g_totalSearchMs + g_totalPass1Ms + g_totalPass2Ms + g_totalFlushMs;
-    double indexBuildTotal = g_totalShadowInsMs + graphBuild;
+    double diskAnnCoreBuild = g_totalShadowInsMs + graphBuild;
+    double indexBuildTotal = g_totalIndexBuildMs > 0 ? g_totalIndexBuildMs : diskAnnCoreBuild;
     fprintf(stderr, "\n=== diskAnn insert breakdown (%d inserts) ===\n", g_totalInsertCount);
     fprintf(stderr, "  table insert:        %8.1f ms  (%d ops)\n",
             g_totalTableInsertMs, g_totalTableInsertCount);
-    fprintf(stderr, "  vector index build:  %8.1f ms\n", indexBuildTotal);
+    fprintf(stderr, "  vector index build:  %8.1f ms  (%d ops)\n",
+            indexBuildTotal, g_totalIndexBuildCount);
+    fprintf(stderr, "    diskAnn core build:%8.1f ms\n", diskAnnCoreBuild);
     fprintf(stderr, "    shadow row insert: %8.1f ms\n", g_totalShadowInsMs);
     fprintf(stderr, "    graph build/update:%8.1f ms\n", graphBuild);
     fprintf(stderr, "    build blob read path:%7.1f ms\n", g_totalBuildReadMs);

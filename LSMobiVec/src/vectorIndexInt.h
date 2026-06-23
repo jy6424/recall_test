@@ -82,6 +82,7 @@ int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, int nB
 int blobSpotFlush(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot);
 void blobSpotFree(BlobSpot *pBlobSpot);
 void diskAnnRecordTableInsert(double ms);
+void diskAnnRecordIndexBuildTotal(double ms);
 
 /*
  * Accessor for node binary format

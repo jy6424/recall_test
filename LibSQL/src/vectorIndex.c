@@ -29,6 +29,7 @@
 #include "vdbeInt.h"
 #include "sqliteInt.h"
 #include "vectorIndexInt.h"
+#include <time.h>
 
 /*
  * The code which glue SQLite internals with pure DiskANN implementation resides here
@@ -1119,16 +1120,34 @@ int vectorIndexInsert(
 ){
   int rc;
   VectorInRow vectorInRow;
+  struct timespec _vi0, _vi1;
 
+  clock_gettime(CLOCK_MONOTONIC, &_vi0);
   rc = vectorInRowAlloc(pCur->db, pRecord, &vectorInRow, pzErrMsg);
   if( rc != SQLITE_OK ){
+    clock_gettime(CLOCK_MONOTONIC, &_vi1);
+    diskAnnRecordIndexBuildTotal(
+        (_vi1.tv_sec - _vi0.tv_sec)*1000.0
+      + (_vi1.tv_nsec - _vi0.tv_nsec)/1e6
+    );
     return rc;
   }
   if( vectorInRow.pVector == NULL ){
+    vectorInRowFree(pCur->db, &vectorInRow);
+    clock_gettime(CLOCK_MONOTONIC, &_vi1);
+    diskAnnRecordIndexBuildTotal(
+        (_vi1.tv_sec - _vi0.tv_sec)*1000.0
+      + (_vi1.tv_nsec - _vi0.tv_nsec)/1e6
+    );
     return SQLITE_OK;
   }
   rc = diskAnnInsert(pCur->pIndex, &vectorInRow, pzErrMsg);
   vectorInRowFree(pCur->db, &vectorInRow);
+  clock_gettime(CLOCK_MONOTONIC, &_vi1);
+  diskAnnRecordIndexBuildTotal(
+      (_vi1.tv_sec - _vi0.tv_sec)*1000.0
+    + (_vi1.tv_nsec - _vi0.tv_nsec)/1e6
+  );
   return rc;
 }
 

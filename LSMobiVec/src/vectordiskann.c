@@ -2058,11 +2058,13 @@ static double g_totalPass1Ms = 0;
 static double g_totalPass2Ms = 0;
 static double g_totalNewFlushMs = 0;
 static double g_totalTableInsertMs = 0;
+static double g_totalIndexBuildMs = 0;
 static double g_totalBuildReadMs = 0;
 static double g_totalBuildWriteMs = 0;
 static double g_totalBuildDistMs = 0;
 static double g_totalBuildLsmMs = 0;
 static int g_totalTableInsertCount = 0;
+static int g_totalIndexBuildCount = 0;
 static long long g_totalPass2Visited = 0;
 static long long g_totalPass2EdgeUpdates = 0;
 static long long g_totalExistingFlushes = 0;
@@ -2075,6 +2077,11 @@ static int g_atexitRegistered = 0;
 void diskAnnRecordTableInsert(double ms){
   g_totalTableInsertMs += ms;
   g_totalTableInsertCount++;
+}
+
+void diskAnnRecordIndexBuildTotal(double ms){
+  g_totalIndexBuildMs += ms;
+  g_totalIndexBuildCount++;
 }
 
 static void diskAnnPrintSearchStats(void){
@@ -2105,11 +2112,14 @@ static void diskAnnPrintSearchStats(void){
 static void diskAnnPrintInsertStats(void){
   if( g_totalInsertCount > 0 ){
     double graphBuild = g_totalSearchMs + g_totalPass1Ms + g_totalPass2Ms + g_totalNewFlushMs;
-    double indexBuildTotal = g_totalShadowInsMs + graphBuild;
+    double diskAnnCoreBuild = g_totalShadowInsMs + graphBuild;
+    double indexBuildTotal = g_totalIndexBuildMs > 0 ? g_totalIndexBuildMs : diskAnnCoreBuild;
     fprintf(stderr, "\n=== diskAnn insert breakdown (%d inserts) ===\n", g_totalInsertCount);
     fprintf(stderr, "  table insert:        %8.1f ms  (%d ops)\n",
             g_totalTableInsertMs, g_totalTableInsertCount);
-    fprintf(stderr, "  vector index build:  %8.1f ms\n", indexBuildTotal);
+    fprintf(stderr, "  vector index build:  %8.1f ms  (%d ops)\n",
+            indexBuildTotal, g_totalIndexBuildCount);
+    fprintf(stderr, "    diskAnn core build:%8.1f ms\n", diskAnnCoreBuild);
     fprintf(stderr, "    shadow row insert: %8.1f ms\n", g_totalShadowInsMs);
     fprintf(stderr, "    graph build/update:%8.1f ms\n", graphBuild);
     fprintf(stderr, "    build KV read path:%7.1f ms\n", g_totalBuildReadMs);
