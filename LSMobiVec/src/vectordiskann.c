@@ -2057,13 +2057,14 @@ static double g_totalShadowInsMs = 0;
 static double g_totalPass1Ms = 0;
 static double g_totalPass2Ms = 0;
 static double g_totalNewFlushMs = 0;
-static double g_totalTableInsertMs = 0;
+static double g_totalInsertStmtMs = 0;
+static double g_totalInsertOtherMs = 0;
 static double g_totalIndexBuildMs = 0;
 static double g_totalBuildReadMs = 0;
 static double g_totalBuildWriteMs = 0;
 static double g_totalBuildDistMs = 0;
 static double g_totalBuildLsmMs = 0;
-static int g_totalTableInsertCount = 0;
+static int g_totalInsertStmtCount = 0;
 static int g_totalIndexBuildCount = 0;
 static long long g_totalPass2Visited = 0;
 static long long g_totalPass2EdgeUpdates = 0;
@@ -2074,9 +2075,13 @@ static long long g_totalNewFlushBytes = 0;
 static int g_totalInsertCount = 0;
 static int g_atexitRegistered = 0;
 
-void diskAnnRecordTableInsert(double ms){
-  g_totalTableInsertMs += ms;
-  g_totalTableInsertCount++;
+void diskAnnRecordInsertStmt(double ms){
+  g_totalInsertStmtMs += ms;
+  g_totalInsertStmtCount++;
+}
+
+void diskAnnRecordInsertOther(double ms){
+  g_totalInsertOtherMs += ms;
 }
 
 void diskAnnRecordIndexBuildTotal(double ms){
@@ -2115,8 +2120,9 @@ static void diskAnnPrintInsertStats(void){
     double diskAnnCoreBuild = g_totalShadowInsMs + graphBuild;
     double indexBuildTotal = g_totalIndexBuildMs > 0 ? g_totalIndexBuildMs : diskAnnCoreBuild;
     fprintf(stderr, "\n=== diskAnn insert breakdown (%d inserts) ===\n", g_totalInsertCount);
-    fprintf(stderr, "  table insert:        %8.1f ms  (%d ops)\n",
-            g_totalTableInsertMs, g_totalTableInsertCount);
+    fprintf(stderr, "  insert statement total:%7.1f ms  (%d stmts)\n",
+            g_totalInsertStmtMs, g_totalInsertStmtCount);
+    fprintf(stderr, "  VDBE work:         %8.1f ms\n", g_totalInsertOtherMs);
     fprintf(stderr, "  vector index build:  %8.1f ms  (%d ops)\n",
             indexBuildTotal, g_totalIndexBuildCount);
     fprintf(stderr, "    diskAnn core build:%8.1f ms\n", diskAnnCoreBuild);

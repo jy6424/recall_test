@@ -20,12 +20,18 @@
 */
 #include "sqliteInt.h"
 #include "vdbeInt.h"
-#include <time.h>
+#include <sys/time.h>
 #ifdef LIBSQL_ENABLE_WASM_RUNTIME
 #include "ext/udf/wasm_bindings.h"
 #endif
 #ifndef SQLITE_OMIT_VECTOR
 #include "vectorIndexInt.h"
+
+static double diskAnnNowMs(void){
+  struct timeval tv;
+  gettimeofday(&tv, 0);
+  return (double)tv.tv_sec*1000.0 + (double)tv.tv_usec/1000.0;
+}
 #endif
 
 /*
@@ -860,6 +866,13 @@ int sqlite3VdbeExec(
   u64 *pnCycle = 0;
   int bStmtScanStatus = IS_STMT_SCANSTATUS(db)!=0;
 #endif
+#ifndef SQLITE_OMIT_VECTOR
+  int isInsertStmt = 0;
+  double insertStmtStartMs = 0;
+  double insertOtherMs = 0;
+  double insertOpStartMs = 0;
+  int isVectorInsertOp = 0;
+#endif
   /*** INSERT STACK UNION HERE ***/
 
   assert( p->eVdbeState==VDBE_RUN_STATE );  /* sqlite3_step() verifies this */
@@ -889,6 +902,23 @@ int sqlite3VdbeExec(
   db->busyHandler.nBusy = 0;
   if( AtomicLoad(&db->u1.isInterrupted) ) goto abort_due_to_interrupt;
   sqlite3VdbeIOTraceSql(p);
+#ifndef SQLITE_OMIT_VECTOR
+  if( p->zSql ){
+    const char *z = p->zSql;
+    int ii;
+    while( sqlite3Isspace(*z) ) z++;
+    if( sqlite3_strnicmp(z, "insert", 6)==0 ){
+      isInsertStmt = 1;
+      for(ii=0; z[ii]; ii++){
+        if( sqlite3_strnicmp(&z[ii], "_shadow", 7)==0 ){
+          isInsertStmt = 0;
+          break;
+        }
+      }
+      if( isInsertStmt ) insertStmtStartMs = diskAnnNowMs();
+    }
+  }
+#endif
 #ifdef SQLITE_DEBUG
   sqlite3BeginBenignMalloc();
   if( p->pc==0
@@ -923,6 +953,17 @@ int sqlite3VdbeExec(
 
     assert( pOp>=aOp && pOp<&aOp[p->nOp]);
     nVmStep++;
+#ifndef SQLITE_OMIT_VECTOR
+    if( isInsertStmt ){
+      VdbeCursor *pOpCsr = 0;
+      insertOpStartMs = diskAnnNowMs();
+      isVectorInsertOp = 0;
+      if( pOp->opcode==OP_IdxInsert && pOp->p1>=0 && pOp->p1<p->nCursor ){
+        pOpCsr = p->apCsr[pOp->p1];
+        isVectorInsertOp = pOpCsr && isVectorCursor(pOpCsr);
+      }
+    }
+#endif
 
 #if defined(VDBE_PROFILE)
     pOp->nExec++;
@@ -3422,10 +3463,6 @@ case OP_MakeRecord: {
   u32 len;               /* Length of a field */
   u8 *zHdr;              /* Where to write next byte of the header */
   u8 *zPayload;          /* Where to write next byte of the payload */
-#ifndef SQLITE_OMIT_VECTOR
-  int isBaseTableRecord = 0;
-  struct timespec _tri0, _tri1;
-#endif
 
   /* Assuming the record contains N fields, the record format looks
   ** like this:
@@ -3456,26 +3493,6 @@ case OP_MakeRecord: {
   assert( pOp->p3<pOp->p1 || pOp->p3>=pOp->p1+pOp->p2 );
   pOut = &aMem[pOp->p3];
   memAboutToChange(p, pOut);
-#ifndef SQLITE_OMIT_VECTOR
-  {
-    Op *pScan;
-    for(pScan=pOp+1; pScan<&aOp[p->nOp] && pScan<pOp+80; pScan++){
-      if( pScan->opcode==OP_Insert && pScan->p2==pOp->p3 ){
-        if( pScan->p4type==P4_TABLE && pScan->p4.pTab && pScan->p4.pTab->zName ){
-          const char *zName = pScan->p4.pTab->zName;
-          int nName = sqlite3Strlen30(zName);
-          isBaseTableRecord = (
-              sqlite3_strnicmp(zName, "sqlite_", 7)!=0
-           && (nName<7 || sqlite3_stricmp(&zName[nName-7], "_shadow")!=0)
-          );
-        }
-        break;
-      }
-      if( pScan->opcode==OP_Halt ) break;
-    }
-    if( isBaseTableRecord ) clock_gettime(CLOCK_MONOTONIC, &_tri0);
-  }
-#endif
 
   /* Apply the requested affinity to all inputs
   */
@@ -3740,15 +3757,6 @@ case OP_MakeRecord: {
 
   assert( pOp->p3>0 && pOp->p3<=(p->nMem+1 - p->nCursor) );
   REGISTER_TRACE(pOp->p3, pOut);
-#ifndef SQLITE_OMIT_VECTOR
-  if( isBaseTableRecord ){
-    clock_gettime(CLOCK_MONOTONIC, &_tri1);
-    diskAnnRecordTableInsert(
-        (_tri1.tv_sec - _tri0.tv_sec)*1000.0
-      + (_tri1.tv_nsec - _tri0.tv_nsec)/1e6
-    );
-  }
-#endif
   break;
 }
 
@@ -5804,10 +5812,6 @@ case OP_Insert: {
   const char *zDb;  /* database name - used by the update hook */
   Table *pTab;      /* Table structure - used by update and pre-update hooks */
   BtreePayload x;   /* Payload to be inserted */
-#ifndef SQLITE_OMIT_VECTOR
-  int isBaseTableInsert = 0;
-  struct timespec _tii0, _tii1;
-#endif
   pData = &aMem[pOp->p2];
   assert( pOp->p1>=0 && pOp->p1<p->nCursor );
   assert( memIsValid(pData) );
@@ -5868,31 +5872,11 @@ case OP_Insert: {
     x.nZero = 0;
   }
   x.pKey = 0;
-#ifndef SQLITE_OMIT_VECTOR
-  if( pOp->p4type==P4_TABLE && pOp->p4.pTab && pOp->p4.pTab->zName ){
-    const char *zName = pOp->p4.pTab->zName;
-    int nName = sqlite3Strlen30(zName);
-    isBaseTableInsert = (
-        sqlite3_strnicmp(zName, "sqlite_", 7)!=0
-     && (nName<7 || sqlite3_stricmp(&zName[nName-7], "_shadow")!=0)
-    );
-  }
-  if( isBaseTableInsert ) clock_gettime(CLOCK_MONOTONIC, &_tii0);
-#endif
   assert( BTREE_PREFORMAT==OPFLAG_PREFORMAT );
   rc = sqlite3BtreeInsert(pC->uc.pCursor, &x,
       (pOp->p5 & (OPFLAG_APPEND|OPFLAG_SAVEPOSITION|OPFLAG_PREFORMAT)),
       seekResult
   );
-#ifndef SQLITE_OMIT_VECTOR
-  if( isBaseTableInsert ){
-    clock_gettime(CLOCK_MONOTONIC, &_tii1);
-    diskAnnRecordTableInsert(
-        (_tii1.tv_sec - _tii0.tv_sec)*1000.0
-      + (_tii1.tv_nsec - _tii0.tv_nsec)/1e6
-    );
-  }
-#endif
   pC->deferredMoveto = 0;
   pC->cacheStatus = CACHE_STALE;
   colCacheCtr++;
@@ -6628,6 +6612,8 @@ case OP_IdxInsert: {        /* in2 */
   if( isVectorCursor(pC) ) {
     UnpackedRecord idxKeyStatic;
     UnpackedRecord *pIdxKey = NULL;
+    double vectorCallStartMs;
+    double vectorCallEndMs;
     int i;
     rc = ExpandBlob(pIn2);
     if( rc ) goto abort_due_to_error;
@@ -6645,7 +6631,10 @@ case OP_IdxInsert: {        /* in2 */
       pIdxKey = sqlite3VdbeAllocUnpackedRecord(pC->pKeyInfo);
       if( pIdxKey==0 ) goto no_mem;
       sqlite3VdbeRecordUnpack(pC->pKeyInfo, x.nKey, x.pKey, pIdxKey);
+      vectorCallStartMs = diskAnnNowMs();
+      if( isInsertStmt ) insertOtherMs += vectorCallStartMs - insertOpStartMs;
       rc = vectorIndexInsert(pC->uc.pVecIdx, pIdxKey, &p->zErrMsg);
+      vectorCallEndMs = diskAnnNowMs();
       /* 
        * vectorIndexInsert can allocate additional memory for sqlite3_value (usually during sqlite3_value_text/sqlite3_value_blob calls)
        * so, we need to explicitly clear it before freeing whole UnpackedRecord with single free(...) call
@@ -6654,10 +6643,15 @@ case OP_IdxInsert: {        /* in2 */
         sqlite3VdbeMemRelease(pIdxKey->aMem + i);
       }
       sqlite3DbFreeNN(db, pIdxKey);
+      if( isInsertStmt ) insertOtherMs += diskAnnNowMs() - vectorCallEndMs;
     }else {
       idxKeyStatic.nField = x.nMem;
       idxKeyStatic.aMem = x.aMem;
+      vectorCallStartMs = diskAnnNowMs();
+      if( isInsertStmt ) insertOtherMs += vectorCallStartMs - insertOpStartMs;
       rc = vectorIndexInsert(pC->uc.pVecIdx, &idxKeyStatic, &p->zErrMsg);
+      vectorCallEndMs = diskAnnNowMs();
+      if( isInsertStmt ) insertOtherMs += diskAnnNowMs() - vectorCallEndMs;
     }
     if( rc ) goto abort_due_to_error;
     break;
@@ -9266,6 +9260,12 @@ default: {          /* This is really OP_Noop, OP_Explain */
 *****************************************************************************/
     }
 
+#ifndef SQLITE_OMIT_VECTOR
+    if( isInsertStmt && !isVectorInsertOp ){
+      insertOtherMs += diskAnnNowMs() - insertOpStartMs;
+    }
+#endif
+
 #if defined(VDBE_PROFILE)
     *pnCycle += sqlite3NProfileCnt ? sqlite3NProfileCnt : sqlite3Hwtime();
     pnCycle = 0;
@@ -9375,6 +9375,12 @@ vdbe_return:
   if( DbMaskNonZero(p->lockMask) ){
     sqlite3VdbeLeave(p);
   }
+#ifndef SQLITE_OMIT_VECTOR
+  if( isInsertStmt ){
+    diskAnnRecordInsertStmt(diskAnnNowMs() - insertStmtStartMs);
+    diskAnnRecordInsertOther(insertOtherMs);
+  }
+#endif
   assert( rc!=SQLITE_OK || nExtraDelete==0
        || sqlite3_strlike("DELETE%",p->zSql,0)!=0
   );

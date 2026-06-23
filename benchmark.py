@@ -504,8 +504,12 @@ def parse_diskann_stats(stderr_text):
             stats[key] = conv(m.group(1))
 
     # Insert breakdown
-    grab(r'base table insert:\s*([\d.]+)\s+ms', 'table_insert_ms')
-    grab(r'table insert:\s*([\d.]+)\s+ms', 'table_insert_ms')
+    grab(r'insert statement total:\s*([\d.]+)\s+ms', 'insert_stmt_total_ms')
+    grab(r'VDBE work:\s*([\d.]+)\s+ms', 'insert_vdbe_work_ms')
+    grab(r'insert VDBE other:\s*([\d.]+)\s+ms', 'insert_vdbe_work_ms')
+    grab(r'non-index insert remainder:\s*([\d.]+)\s+ms', 'non_index_insert_ms')
+    grab(r'base table insert:\s*([\d.]+)\s+ms', 'non_index_insert_ms')
+    grab(r'table insert:\s*([\d.]+)\s+ms', 'non_index_insert_ms')
     grab(r'shadow (?:row|table) insert:\s*([\d.]+)\s+ms', 'shadow_insert_ms')
     grab(r'vector index build:\s*([\d.]+)\s+ms', 'build_total_ms')
     grab(r'index build:\s*([\d.]+)\s+ms', 'build_total_ms')
@@ -639,7 +643,8 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
             f"sys={ins_time.get('sys_s', 0):.2f}s"
         )
     if ins_stats.get('build_total_ms') is not None:
-        table_s = ins_stats.get('table_insert_ms', 0) / 1000
+        stmt_s = ins_stats.get('insert_stmt_total_ms', 0) / 1000
+        vdbe_work_s = ins_stats.get('insert_vdbe_work_ms', 0) / 1000
         build_s = ins_stats.get('build_total_ms', 0) / 1000
         shadow_s = ins_stats.get('shadow_insert_ms', 0) / 1000
         graph_s = ins_stats.get('graph_build_ms', 0) / 1000
@@ -648,7 +653,8 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         dist_s = ins_stats.get('build_dist_ms', 0) / 1000
         lsm_s = ins_stats.get('build_lsm_ms', 0) / 1000
         print(
-            f"        BaseTbl={table_s:.1f}s  VecBuild={build_s:.1f}s  "
+            f"        Stmt={stmt_s:.1f}s  VDBEWork={vdbe_work_s:.1f}s  "
+            f"VecBuild={build_s:.1f}s  "
             f"Shadow={shadow_s:.1f}s  GraphBuild={graph_s:.1f}s  "
             f"ReadPath={read_s:.1f}s  WritePath={write_s:.1f}s  Dist={dist_s:.1f}s  "
             f"LSMWork={lsm_s:.1f}s"
@@ -892,10 +898,10 @@ def main():
     show_compact = use_compaction
     for ds_name, ds_results in all_results.items():
         ins_hdr = (
-            f"{'Overall':>8} {'BaseTbl':>8} {'VecBuild':>8} {'ReadPath':>8} "
+            f"{'Overall':>8} {'Stmt':>8} {'VDBEWork':>8} {'VecBuild':>8} {'ReadPath':>8} "
             f"{'WritePath':>9} {'Dist':>8} {'LSM':>8}"
         )
-        ins_sub = f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>9} {'(s)':>8} {'(s)':>8}"
+        ins_sub = f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>9} {'(s)':>8} {'(s)':>8}"
         if show_compact:
             ins_hdr += f" {'Compact':>8}"
             ins_sub += f" {'(s)':>8}"
@@ -919,7 +925,8 @@ def main():
         for r in ds_results:
             short_label = r['label'].replace(f"{ds_name}_", "")
             ist = r.get('ins_stats', {})
-            table_s = ist.get('table_insert_ms', 0) / 1000
+            stmt_s = ist.get('insert_stmt_total_ms', 0) / 1000
+            vdbe_work_s = ist.get('insert_vdbe_work_ms', 0) / 1000
             build_s = ist.get('build_total_ms', 0) / 1000
             read_s = ist.get('build_read_ms', 0) / 1000
             write_s = ist.get('build_write_ms', 0) / 1000
@@ -927,7 +934,8 @@ def main():
             lsm_s = ist.get('build_lsm_ms', 0) / 1000
             qst = r.get('q_stats', {})
             ins_vals = (f"{r['insert_time_s']:>8.1f} "
-                        f"{table_s:>8.1f} {build_s:>8.1f} {read_s:>8.1f} "
+                        f"{stmt_s:>8.1f} {vdbe_work_s:>8.1f} {build_s:>8.1f} "
+                        f"{read_s:>8.1f} "
                         f"{write_s:>9.1f} {dist_s:>8.1f} {lsm_s:>8.1f}")
             if show_compact:
                 compact_str = f"{r['compact_time_s']:>8.1f}" if r['compact_time_s'] > 0 else f"{'---':>8}"

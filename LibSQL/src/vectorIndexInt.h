@@ -61,7 +61,8 @@ int blobSpotCreate(const DiskAnnIndex *pIndex, BlobSpot **ppBlobSpot, u64 nRowid
 int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, int nBufferSize);
 int blobSpotFlush(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot);
 void blobSpotFree(BlobSpot *pBlobSpot);
-void diskAnnRecordTableInsert(double ms);
+void diskAnnRecordInsertStmt(double ms);
+void diskAnnRecordInsertOther(double ms);
 void diskAnnRecordIndexBuildTotal(double ms);
 
 /*

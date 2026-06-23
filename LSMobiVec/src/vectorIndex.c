@@ -29,7 +29,13 @@
 #include "sqliteInt.h"
 #include "vdbeInt.h"
 #include "vectorIndexInt.h"
-#include <time.h>
+#include <sys/time.h>
+
+static double diskAnnNowMs(void){
+  struct timeval tv;
+  gettimeofday(&tv, 0);
+  return (double)tv.tv_sec*1000.0 + (double)tv.tv_usec/1000.0;
+}
 
 /**************************************************************************
 ** VectorIdxParams utilities
@@ -1001,35 +1007,23 @@ int vectorIndexInsert(
 ){
   int rc;
   VectorInRow vectorInRow;
-  struct timespec _vi0, _vi1;
+  double indexBuildStartMs;
 
-  clock_gettime(CLOCK_MONOTONIC, &_vi0);
+  indexBuildStartMs = diskAnnNowMs();
   rc = vectorInRowAlloc(pCur->db, rowid, pVector, &vectorInRow, pzErrMsg);
   if( rc != SQLITE4_OK ){
-    clock_gettime(CLOCK_MONOTONIC, &_vi1);
-    diskAnnRecordIndexBuildTotal(
-      (_vi1.tv_sec - _vi0.tv_sec)*1000.0
-      + (_vi1.tv_nsec - _vi0.tv_nsec)/1e6
-    );
+    diskAnnRecordIndexBuildTotal(diskAnnNowMs() - indexBuildStartMs);
     return rc;
   }
   if( vectorInRow.pVector == NULL ){
     /* NULL vector - skip insertion */
     vectorInRowFree(pCur->db, &vectorInRow);
-    clock_gettime(CLOCK_MONOTONIC, &_vi1);
-    diskAnnRecordIndexBuildTotal(
-      (_vi1.tv_sec - _vi0.tv_sec)*1000.0
-      + (_vi1.tv_nsec - _vi0.tv_nsec)/1e6
-    );
+    diskAnnRecordIndexBuildTotal(diskAnnNowMs() - indexBuildStartMs);
     return SQLITE4_OK;
   }
   rc = diskAnnInsert(pCur->pIndex, &vectorInRow, pzErrMsg);
   vectorInRowFree(pCur->db, &vectorInRow);
-  clock_gettime(CLOCK_MONOTONIC, &_vi1);
-  diskAnnRecordIndexBuildTotal(
-    (_vi1.tv_sec - _vi0.tv_sec)*1000.0
-    + (_vi1.tv_nsec - _vi0.tv_nsec)/1e6
-  );
+  diskAnnRecordIndexBuildTotal(diskAnnNowMs() - indexBuildStartMs);
   return rc;
 }
 
