@@ -515,6 +515,8 @@ def parse_diskann_stats(stderr_text):
     grab(r'vector index build:\s*([\d.]+)\s+ms', 'build_total_ms')
     grab(r'index build:\s*([\d.]+)\s+ms', 'build_total_ms')
     grab(r'graph build/update:\s*([\d.]+)\s+ms', 'graph_build_ms')
+    grab(r'build graph traversal:\s*([\d.]+)\s+ms', 'build_traversal_ms')
+    grab(r'build edge update:\s*([\d.]+)\s+ms', 'build_edge_update_ms')
     grab(r'build KV read path:\s*([\d.]+)\s+ms', 'build_read_ms')
     grab(r'build blob read path:\s*([\d.]+)\s+ms', 'build_read_ms')
     grab(r'build read I/O:\s*([\d.]+)\s+ms', 'build_read_ms')
@@ -650,6 +652,8 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         build_s = ins_stats.get('build_total_ms', 0) / 1000
         shadow_s = ins_stats.get('shadow_insert_ms', 0) / 1000
         graph_s = ins_stats.get('graph_build_ms', 0) / 1000
+        traversal_s = ins_stats.get('build_traversal_ms', 0) / 1000
+        edge_update_s = ins_stats.get('build_edge_update_ms', 0) / 1000
         read_s = ins_stats.get('build_read_ms', 0) / 1000
         write_s = ins_stats.get('build_write_ms', 0) / 1000
         dist_s = ins_stats.get('build_dist_ms', 0) / 1000
@@ -658,6 +662,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
             f"        Stmt={stmt_s:.1f}s  VDBEWork={vdbe_work_s:.1f}s  "
             f"StmtFinish={finish_s:.1f}s  VecBuild={build_s:.1f}s  "
             f"Shadow={shadow_s:.1f}s  GraphBuild={graph_s:.1f}s  "
+            f"BuildTrav={traversal_s:.1f}s  EdgeUpd={edge_update_s:.1f}s  "
             f"ReadPath={read_s:.1f}s  WritePath={write_s:.1f}s  Dist={dist_s:.1f}s  "
             f"LSMWork={lsm_s:.1f}s"
         )

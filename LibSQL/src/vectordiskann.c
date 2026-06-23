@@ -1999,6 +1999,8 @@ void diskAnnRecordIndexBuildTotal(double ms){
 static void diskAnnPrintInsertStats(void){
   if( g_totalInsertCount > 0 ){
     double graphBuild = g_totalSearchMs + g_totalPass1Ms + g_totalPass2Ms + g_totalFlushMs;
+    double graphTraversal = g_totalSearchMs;
+    double edgeUpdate = g_totalPass1Ms + g_totalPass2Ms + g_totalFlushMs;
     double diskAnnCoreBuild = g_totalShadowInsMs + graphBuild;
     double indexBuildTotal = g_totalIndexBuildMs > 0 ? g_totalIndexBuildMs : diskAnnCoreBuild;
     fprintf(stderr, "\n=== diskAnn insert breakdown (%d inserts) ===\n", g_totalInsertCount);
@@ -2011,6 +2013,8 @@ static void diskAnnPrintInsertStats(void){
     fprintf(stderr, "    diskAnn core build:%8.1f ms\n", diskAnnCoreBuild);
     fprintf(stderr, "    shadow row insert: %8.1f ms\n", g_totalShadowInsMs);
     fprintf(stderr, "    graph build/update:%8.1f ms\n", graphBuild);
+    fprintf(stderr, "      build graph traversal:%7.1f ms\n", graphTraversal);
+    fprintf(stderr, "      build edge update:    %7.1f ms\n", edgeUpdate);
     fprintf(stderr, "    build blob read path:%7.1f ms\n", g_totalBuildReadMs);
     fprintf(stderr, "    build blob write path:%6.1f ms\n", g_totalBuildWriteMs);
     fprintf(stderr, "    build distance:%7.1f ms\n", g_totalBuildDistMs);
