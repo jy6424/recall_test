@@ -50,7 +50,7 @@
 #ifndef SQLITE4_OMIT_VECTOR
 #include "vectorIndexInt.h"
 
-static double diskAnnNowMs(void){
+static double diskAnnVdbeNowMs(void){
   struct timeval tv;
   gettimeofday(&tv, 0);
   return (double)tv.tv_sec*1000.0 + (double)tv.tv_usec/1000.0;
@@ -608,7 +608,7 @@ int sqlite4VdbeExec(
           break;
         }
       }
-      if( isInsertStmt ) insertStmtStartMs = diskAnnNowMs();
+      if( isInsertStmt ) insertStmtStartMs = diskAnnVdbeNowMs();
     }
   }
 #endif
@@ -640,7 +640,7 @@ int sqlite4VdbeExec(
 #ifndef SQLITE4_OMIT_VECTOR
     if( isInsertStmt ){
       VdbeCursor *pOpCsr = 0;
-      insertOpStartMs = diskAnnNowMs();
+      insertOpStartMs = diskAnnVdbeNowMs();
       isVectorInsertOp = 0;
       if( pOp->opcode==OP_Insert && pOp->p1>=0 && pOp->p1<p->nCursor ){
         pOpCsr = p->apCsr[pOp->p1];
@@ -3840,14 +3840,14 @@ case OP_Insert: {
       rowid = sqlite4VdbeIntValue(pKey);
     }
     /* pData holds the vector value for index insert */
-    vectorCallStartMs = diskAnnNowMs();
+    vectorCallStartMs = diskAnnVdbeNowMs();
     if( isInsertStmt ) insertOtherMs += vectorCallStartMs - insertOpStartMs;
     rc = vectorIndexInsert(pC->pVecIdx, rowid, (sqlite4_value*)pData, &p->zErrMsg);
-    vectorCallEndMs = diskAnnNowMs();
+    vectorCallEndMs = diskAnnVdbeNowMs();
     if( rc ) goto abort_due_to_error;
     if( pOp->p5 & OPFLAG_NCHANGE ) p->nChange++;
     pC->rowChnged = 1;
-    if( isInsertStmt ) insertOtherMs += diskAnnNowMs() - vectorCallEndMs;
+    if( isInsertStmt ) insertOtherMs += diskAnnVdbeNowMs() - vectorCallEndMs;
     break;
   }
 #endif
@@ -5146,7 +5146,7 @@ default: {          /* This is really OP_Noop and OP_Explain */
 
 #ifndef SQLITE4_OMIT_VECTOR
     if( isInsertStmt && !isVectorInsertOp ){
-      insertOtherMs += diskAnnNowMs() - insertOpStartMs;
+      insertOtherMs += diskAnnVdbeNowMs() - insertOpStartMs;
     }
 #endif
 
@@ -5206,7 +5206,7 @@ vdbe_error_halt:
 vdbe_return:
 #ifndef SQLITE4_OMIT_VECTOR
   if( isInsertStmt ){
-    diskAnnRecordInsertStmt(diskAnnNowMs() - insertStmtStartMs);
+    diskAnnRecordInsertStmt(diskAnnVdbeNowMs() - insertStmtStartMs);
     diskAnnRecordInsertOther(insertOtherMs);
   }
 #endif

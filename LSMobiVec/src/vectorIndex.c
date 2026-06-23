@@ -31,7 +31,7 @@
 #include "vectorIndexInt.h"
 #include <sys/time.h>
 
-static double diskAnnNowMs(void){
+static double diskAnnVectorIndexNowMs(void){
   struct timeval tv;
   gettimeofday(&tv, 0);
   return (double)tv.tv_sec*1000.0 + (double)tv.tv_usec/1000.0;
@@ -1009,21 +1009,21 @@ int vectorIndexInsert(
   VectorInRow vectorInRow;
   double indexBuildStartMs;
 
-  indexBuildStartMs = diskAnnNowMs();
+  indexBuildStartMs = diskAnnVectorIndexNowMs();
   rc = vectorInRowAlloc(pCur->db, rowid, pVector, &vectorInRow, pzErrMsg);
   if( rc != SQLITE4_OK ){
-    diskAnnRecordIndexBuildTotal(diskAnnNowMs() - indexBuildStartMs);
+    diskAnnRecordIndexBuildTotal(diskAnnVectorIndexNowMs() - indexBuildStartMs);
     return rc;
   }
   if( vectorInRow.pVector == NULL ){
     /* NULL vector - skip insertion */
     vectorInRowFree(pCur->db, &vectorInRow);
-    diskAnnRecordIndexBuildTotal(diskAnnNowMs() - indexBuildStartMs);
+    diskAnnRecordIndexBuildTotal(diskAnnVectorIndexNowMs() - indexBuildStartMs);
     return SQLITE4_OK;
   }
   rc = diskAnnInsert(pCur->pIndex, &vectorInRow, pzErrMsg);
   vectorInRowFree(pCur->db, &vectorInRow);
-  diskAnnRecordIndexBuildTotal(diskAnnNowMs() - indexBuildStartMs);
+  diskAnnRecordIndexBuildTotal(diskAnnVectorIndexNowMs() - indexBuildStartMs);
   return rc;
 }
 

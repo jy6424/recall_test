@@ -27,7 +27,7 @@
 #ifndef SQLITE_OMIT_VECTOR
 #include "vectorIndexInt.h"
 
-static double diskAnnNowMs(void){
+static double diskAnnVdbeNowMs(void){
   struct timeval tv;
   gettimeofday(&tv, 0);
   return (double)tv.tv_sec*1000.0 + (double)tv.tv_usec/1000.0;
@@ -915,7 +915,7 @@ int sqlite3VdbeExec(
           break;
         }
       }
-      if( isInsertStmt ) insertStmtStartMs = diskAnnNowMs();
+      if( isInsertStmt ) insertStmtStartMs = diskAnnVdbeNowMs();
     }
   }
 #endif
@@ -956,7 +956,7 @@ int sqlite3VdbeExec(
 #ifndef SQLITE_OMIT_VECTOR
     if( isInsertStmt ){
       VdbeCursor *pOpCsr = 0;
-      insertOpStartMs = diskAnnNowMs();
+      insertOpStartMs = diskAnnVdbeNowMs();
       isVectorInsertOp = 0;
       if( pOp->opcode==OP_IdxInsert && pOp->p1>=0 && pOp->p1<p->nCursor ){
         pOpCsr = p->apCsr[pOp->p1];
@@ -6631,10 +6631,10 @@ case OP_IdxInsert: {        /* in2 */
       pIdxKey = sqlite3VdbeAllocUnpackedRecord(pC->pKeyInfo);
       if( pIdxKey==0 ) goto no_mem;
       sqlite3VdbeRecordUnpack(pC->pKeyInfo, x.nKey, x.pKey, pIdxKey);
-      vectorCallStartMs = diskAnnNowMs();
+      vectorCallStartMs = diskAnnVdbeNowMs();
       if( isInsertStmt ) insertOtherMs += vectorCallStartMs - insertOpStartMs;
       rc = vectorIndexInsert(pC->uc.pVecIdx, pIdxKey, &p->zErrMsg);
-      vectorCallEndMs = diskAnnNowMs();
+      vectorCallEndMs = diskAnnVdbeNowMs();
       /* 
        * vectorIndexInsert can allocate additional memory for sqlite3_value (usually during sqlite3_value_text/sqlite3_value_blob calls)
        * so, we need to explicitly clear it before freeing whole UnpackedRecord with single free(...) call
@@ -6643,15 +6643,15 @@ case OP_IdxInsert: {        /* in2 */
         sqlite3VdbeMemRelease(pIdxKey->aMem + i);
       }
       sqlite3DbFreeNN(db, pIdxKey);
-      if( isInsertStmt ) insertOtherMs += diskAnnNowMs() - vectorCallEndMs;
+      if( isInsertStmt ) insertOtherMs += diskAnnVdbeNowMs() - vectorCallEndMs;
     }else {
       idxKeyStatic.nField = x.nMem;
       idxKeyStatic.aMem = x.aMem;
-      vectorCallStartMs = diskAnnNowMs();
+      vectorCallStartMs = diskAnnVdbeNowMs();
       if( isInsertStmt ) insertOtherMs += vectorCallStartMs - insertOpStartMs;
       rc = vectorIndexInsert(pC->uc.pVecIdx, &idxKeyStatic, &p->zErrMsg);
-      vectorCallEndMs = diskAnnNowMs();
-      if( isInsertStmt ) insertOtherMs += diskAnnNowMs() - vectorCallEndMs;
+      vectorCallEndMs = diskAnnVdbeNowMs();
+      if( isInsertStmt ) insertOtherMs += diskAnnVdbeNowMs() - vectorCallEndMs;
     }
     if( rc ) goto abort_due_to_error;
     break;
@@ -9262,7 +9262,7 @@ default: {          /* This is really OP_Noop, OP_Explain */
 
 #ifndef SQLITE_OMIT_VECTOR
     if( isInsertStmt && !isVectorInsertOp ){
-      insertOtherMs += diskAnnNowMs() - insertOpStartMs;
+      insertOtherMs += diskAnnVdbeNowMs() - insertOpStartMs;
     }
 #endif
 
@@ -9377,7 +9377,7 @@ vdbe_return:
   }
 #ifndef SQLITE_OMIT_VECTOR
   if( isInsertStmt ){
-    diskAnnRecordInsertStmt(diskAnnNowMs() - insertStmtStartMs);
+    diskAnnRecordInsertStmt(diskAnnVdbeNowMs() - insertStmtStartMs);
     diskAnnRecordInsertOther(insertOtherMs);
   }
 #endif
