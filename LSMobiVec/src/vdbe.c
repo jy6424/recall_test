@@ -570,10 +570,6 @@ int sqlite4VdbeExec(
   u64 start;                 /* CPU clock count at start of opcode */
   int origPc;                /* Program counter at start of opcode */
 #endif
-#ifndef SQLITE4_OMIT_VECTOR
-  int isTableInsertStmt = 0;
-  struct timespec _tis0, _tis1;
-#endif
   /*** INSERT STACK UNION HERE ***/
 
   assert( p->magic==VDBE_MAGIC_RUN );  /* sqlite4_step() verifies this */
@@ -586,23 +582,6 @@ int sqlite4VdbeExec(
   p->rc = SQLITE4_OK;
   assert( p->explain==0 );
   p->pResultSet = 0;
-#ifndef SQLITE4_OMIT_VECTOR
-  if( p->zSql ){
-    const char *z = p->zSql;
-    int ii;
-    while( sqlite4Isspace(*z) ) z++;
-    if( sqlite4_strnicmp(z, "insert", 6)==0 ){
-      isTableInsertStmt = 1;
-      for(ii=0; z[ii]; ii++){
-        if( sqlite4_strnicmp(&z[ii], "_shadow", 7)==0 ){
-          isTableInsertStmt = 0;
-          break;
-        }
-      }
-      if( isTableInsertStmt ) clock_gettime(CLOCK_MONOTONIC, &_tis0);
-    }
-  }
-#endif
   CHECK_FOR_INTERRUPT;
   sqlite4VdbeIOTraceSql(p);
 #ifndef SQLITE4_OMIT_PROGRESS_CALLBACK
@@ -2217,9 +2196,16 @@ case OP_MakeRecord: {
   u8 aSeq[10];           /* Encoded sequence number */
   int nSeq;              /* Size of sequence number in bytes */
   u64 iSeq;              /* Sequence number, if any */
+#ifndef SQLITE4_OMIT_VECTOR
+  int isBaseTableRecord = 0;
+  struct timespec _tri0, _tri1;
+#endif
 
   do{
     bRepeat = 0;
+#ifndef SQLITE4_OMIT_VECTOR
+    isBaseTableRecord = 0;
+#endif
     zAffinity = pOp->p4type==P4_INT32 ? 0 : pOp->p4.z;
     assert( pOp->p1>0 && pOp->p2>0 && pOp->p2+pOp->p1<=p->nMem+1 );
     pData0 = &aMem[pOp->p1];
@@ -2230,6 +2216,35 @@ case OP_MakeRecord: {
     memAboutToChange(p, pOut);
     aRec = 0;
     nSeq = 0;
+#ifndef SQLITE4_OMIT_VECTOR
+    if( pOp->opcode==OP_MakeRecord ){
+      Op *pScan;
+      for(pScan=pOp+1; pScan<&aOp[p->nOp] && pScan<pOp+80; pScan++){
+        if( pScan->opcode==OP_Insert && pScan->p2==pOp->p3 ){
+          VdbeCursor *pInsC = 0;
+          if( pScan->p1>=0 && pScan->p1<p->nCursor ){
+            pInsC = p->apCsr[pScan->p1];
+          }
+          if( pInsC && pInsC->pKeyInfo && pInsC->pKeyInfo->nPK==0 ){
+            char *zIdx = pInsC->pKeyInfo->zIndexName;
+            isBaseTableRecord = 1;
+            if( zIdx ){
+              int ii;
+              for(ii=0; zIdx[ii]; ii++){
+                if( sqlite4_strnicmp(&zIdx[ii], "_shadow", 7)==0 ){
+                  isBaseTableRecord = 0;
+                  break;
+                }
+              }
+            }
+          }
+          break;
+        }
+        if( pScan->opcode==OP_Halt ) break;
+      }
+      if( isBaseTableRecord ) clock_gettime(CLOCK_MONOTONIC, &_tri0);
+    }
+#endif
 
     /* Apply affinities */
     if( zAffinity ){
@@ -2286,6 +2301,15 @@ case OP_MakeRecord: {
       REGISTER_TRACE(pOp->p3, pOut);
       UPDATE_MAX_BLOBSIZE(pOut);
     }
+#ifndef SQLITE4_OMIT_VECTOR
+    if( isBaseTableRecord ){
+      clock_gettime(CLOCK_MONOTONIC, &_tri1);
+      diskAnnRecordTableInsert(
+        (_tri1.tv_sec - _tri0.tv_sec)*1000.0
+        + (_tri1.tv_nsec - _tri0.tv_nsec)/1e6
+      );
+    }
+#endif
   }while( rc==SQLITE4_OK && bRepeat );
   break;
 }
@@ -3800,6 +3824,10 @@ case OP_Insert: {
   int nKVKey;
   KVByteArray *pKVKey;
   KVByteArray aKey[24];
+#ifndef SQLITE4_OMIT_VECTOR
+  int isBaseTableInsert = 0;
+  struct timespec _tii0, _tii1;
+#endif
 
   pC = p->apCsr[pOp->p1];
   pKey = &aMem[pOp->p3];
@@ -3840,11 +3868,36 @@ case OP_Insert: {
     pKVKey = pKey->z;
   }
 
+#ifndef SQLITE4_OMIT_VECTOR
+  if( pC->pKeyInfo && pC->pKeyInfo->nPK==0 ){
+    char *zIdx = pC->pKeyInfo->zIndexName;
+    isBaseTableInsert = 1;
+    if( zIdx ){
+      int ii;
+      for(ii=0; zIdx[ii]; ii++){
+        if( sqlite4_strnicmp(&zIdx[ii], "_shadow", 7)==0 ){
+          isBaseTableInsert = 0;
+          break;
+        }
+      }
+    }
+  }
+  if( isBaseTableInsert ) clock_gettime(CLOCK_MONOTONIC, &_tii0);
+#endif
   rc = sqlite4KVStoreReplace(
      pC->pKVCur->pStore,
      (u8 *)pKVKey, nKVKey,
      (u8 *)(pData ? pData->z : 0), (pData ? pData->n : 0)
   );
+#ifndef SQLITE4_OMIT_VECTOR
+  if( isBaseTableInsert ){
+    clock_gettime(CLOCK_MONOTONIC, &_tii1);
+    diskAnnRecordTableInsert(
+      (_tii1.tv_sec - _tii0.tv_sec)*1000.0
+      + (_tii1.tv_nsec - _tii0.tv_nsec)/1e6
+    );
+  }
+#endif
   pC->rowChnged = 1;
 
   break;
@@ -5172,15 +5225,6 @@ vdbe_error_halt:
   ** release the mutexes on btrees that were acquired at the
   ** top. */
 vdbe_return:
-#ifndef SQLITE4_OMIT_VECTOR
-  if( isTableInsertStmt ){
-    clock_gettime(CLOCK_MONOTONIC, &_tis1);
-    diskAnnRecordTableInsertStmt(
-      (_tis1.tv_sec - _tis0.tv_sec)*1000.0
-      + (_tis1.tv_nsec - _tis0.tv_nsec)/1e6
-    );
-  }
-#endif
   return rc;
 
   /* Jump to here if a string or blob larger than SQLITE4_MAX_LENGTH

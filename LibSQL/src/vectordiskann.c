@@ -59,7 +59,7 @@
 /* Per-operation I/O timing (accumulated in blobSpot functions) */
 static double g_totalBlobReadMs;
 static double g_totalBlobWriteMs;
-static double g_totalTableInsertStmtMs;
+static double g_totalTableInsertMs;
 static int g_searchVisitedTotal;
 static long long g_searchEdgesTotal;
 
@@ -70,7 +70,7 @@ static double g_totalPass1Ms;
 static double g_totalPass2Ms;
 static double g_totalFlushMs;
 static int g_totalInsertCount;
-static int g_totalTableInsertStmtCount;
+static int g_totalTableInsertCount;
 static int g_atexitRegistered;
 
 /* Search-specific stats */
@@ -1974,20 +1974,18 @@ static void diskAnnPrintSearchStats(void){
   }
 }
 
-void diskAnnRecordTableInsertStmt(double ms){
-  g_totalTableInsertStmtMs += ms;
-  g_totalTableInsertStmtCount++;
+void diskAnnRecordTableInsert(double ms){
+  g_totalTableInsertMs += ms;
+  g_totalTableInsertCount++;
 }
 
 static void diskAnnPrintInsertStats(void){
   if( g_totalInsertCount > 0 ){
     double graphBuild = g_totalSearchMs + g_totalPass1Ms + g_totalPass2Ms + g_totalFlushMs;
     double indexBuildTotal = g_totalShadowInsMs + graphBuild;
-    double tableInsertMs = g_totalTableInsertStmtMs - indexBuildTotal;
-    if( tableInsertMs < 0 ) tableInsertMs = 0;
     fprintf(stderr, "\n=== diskAnn insert breakdown (%d inserts) ===\n", g_totalInsertCount);
-    fprintf(stderr, "  table insert:        %8.1f ms  (stmt total %.1f ms, %d stmts)\n",
-            tableInsertMs, g_totalTableInsertStmtMs, g_totalTableInsertStmtCount);
+    fprintf(stderr, "  table insert:        %8.1f ms  (%d ops)\n",
+            g_totalTableInsertMs, g_totalTableInsertCount);
     fprintf(stderr, "  vector index build:  %8.1f ms\n", indexBuildTotal);
     fprintf(stderr, "    shadow row insert: %8.1f ms\n", g_totalShadowInsMs);
     fprintf(stderr, "    graph build/update:%8.1f ms\n", graphBuild);
