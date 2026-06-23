@@ -12,6 +12,8 @@
 
 static int gHasError = 0;
 
+extern void sqlite4_shell_timing_report(void);
+
 static double shell_now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, 0);
@@ -139,6 +141,7 @@ int main(int argc, char **argv) {
     /* Run any remaining input */
     if (accum[0] && !gHasError) run_sql(db, accum);
 
+    sqlite4_shell_timing_report();
     {
         double t0 = shell_now_ms();
         sqlite4_close(db, 0);

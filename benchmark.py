@@ -509,6 +509,11 @@ def parse_diskann_stats(stderr_text):
     grab(r'insert VDBE other:\s*([\d.]+)\s+ms', 'insert_vdbe_work_ms')
     grab(r'statement finish:\s*([\d.]+)\s+ms', 'insert_stmt_finish_ms')
     grab(r'shell db close:\s*([\d.]+)\s+ms', 'shell_close_ms')
+    grab(r'shell statements:\s*(\d+)', 'shell_stmt_count', int)
+    grab(r'shell prepare:\s*([\d.]+)\s+ms', 'shell_prepare_ms')
+    grab(r'shell step:\s*([\d.]+)\s+ms', 'shell_step_ms')
+    grab(r'shell finalize:\s*([\d.]+)\s+ms', 'shell_finalize_ms')
+    grab(r'shell other:\s*([\d.]+)\s+ms', 'shell_other_ms')
     grab(r'non-index insert remainder:\s*([\d.]+)\s+ms', 'non_index_insert_ms')
     grab(r'base table insert:\s*([\d.]+)\s+ms', 'non_index_insert_ms')
     grab(r'table insert:\s*([\d.]+)\s+ms', 'non_index_insert_ms')
@@ -651,6 +656,10 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         vdbe_work_s = ins_stats.get('insert_vdbe_work_ms', 0) / 1000
         finish_s = ins_stats.get('insert_stmt_finish_ms', 0) / 1000
         close_s = ins_stats.get('shell_close_ms', 0) / 1000
+        shell_prepare_s = ins_stats.get('shell_prepare_ms', 0) / 1000
+        shell_step_s = ins_stats.get('shell_step_ms', 0) / 1000
+        shell_finalize_s = ins_stats.get('shell_finalize_ms', 0) / 1000
+        shell_other_s = ins_stats.get('shell_other_ms', 0) / 1000
         build_s = ins_stats.get('build_total_ms', 0) / 1000
         shadow_s = ins_stats.get('shadow_insert_ms', 0) / 1000
         graph_s = ins_stats.get('graph_build_ms', 0) / 1000
@@ -663,6 +672,8 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         print(
             f"        Stmt={stmt_s:.1f}s  VDBEWork={vdbe_work_s:.1f}s  "
             f"StmtFinish={finish_s:.1f}s  Close={close_s:.1f}s  VecBuild={build_s:.1f}s  "
+            f"ShellPrep={shell_prepare_s:.1f}s  ShellStep={shell_step_s:.1f}s  "
+            f"ShellFin={shell_finalize_s:.1f}s  ShellOther={shell_other_s:.1f}s  "
             f"Shadow={shadow_s:.1f}s  GraphBuild={graph_s:.1f}s  "
             f"BuildTrav={traversal_s:.1f}s  EdgeUpd={edge_update_s:.1f}s  "
             f"ReadPath={read_s:.1f}s  WritePath={write_s:.1f}s  Dist={dist_s:.1f}s  "
@@ -907,10 +918,16 @@ def main():
     show_compact = use_compaction
     for ds_name, ds_results in all_results.items():
         ins_hdr = (
-            f"{'Overall':>8} {'Stmt':>8} {'VDBEWork':>8} {'StmtFin':>8} {'Close':>8} {'VecBuild':>8} {'ReadPath':>8} "
+            f"{'Overall':>8} {'Stmt':>8} {'VDBEWork':>8} {'StmtFin':>8} {'Close':>8} "
+            f"{'ShPrep':>8} {'ShStep':>8} {'ShFin':>8} {'ShOther':>8} "
+            f"{'VecBuild':>8} {'ReadPath':>8} "
             f"{'WritePath':>9} {'Dist':>8} {'LSM':>8}"
         )
-        ins_sub = f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>9} {'(s)':>8} {'(s)':>8}"
+        ins_sub = (
+            f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} "
+            f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} "
+            f"{'(s)':>8} {'(s)':>8} {'(s)':>9} {'(s)':>8} {'(s)':>8}"
+        )
         if show_compact:
             ins_hdr += f" {'Compact':>8}"
             ins_sub += f" {'(s)':>8}"
@@ -938,6 +955,10 @@ def main():
             vdbe_work_s = ist.get('insert_vdbe_work_ms', 0) / 1000
             finish_s = ist.get('insert_stmt_finish_ms', 0) / 1000
             close_s = ist.get('shell_close_ms', 0) / 1000
+            shell_prepare_s = ist.get('shell_prepare_ms', 0) / 1000
+            shell_step_s = ist.get('shell_step_ms', 0) / 1000
+            shell_finalize_s = ist.get('shell_finalize_ms', 0) / 1000
+            shell_other_s = ist.get('shell_other_ms', 0) / 1000
             build_s = ist.get('build_total_ms', 0) / 1000
             read_s = ist.get('build_read_ms', 0) / 1000
             write_s = ist.get('build_write_ms', 0) / 1000
@@ -947,6 +968,8 @@ def main():
             ins_vals = (f"{r['insert_time_s']:>8.1f} "
                         f"{stmt_s:>8.1f} {vdbe_work_s:>8.1f} {finish_s:>8.1f} "
                         f"{close_s:>8.1f} "
+                        f"{shell_prepare_s:>8.1f} {shell_step_s:>8.1f} "
+                        f"{shell_finalize_s:>8.1f} {shell_other_s:>8.1f} "
                         f"{build_s:>8.1f} "
                         f"{read_s:>8.1f} "
                         f"{write_s:>9.1f} {dist_s:>8.1f} {lsm_s:>8.1f}")
