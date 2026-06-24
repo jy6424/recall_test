@@ -824,47 +824,128 @@ int diskAnnDropIndex(sqlite4 *db, const char *zDbSName, const char *zIdxName){
 }
 
 /*
- * Select random row from the shadow table using the same SQL OFFSET path as
- * the sqlite3/libSQL implementation. The sqlite4 port has no rowid column in
- * the rowid-like shadow table, so it selects index_key instead.
- */
+ * Select random row from the shadow table using direct KV access.
+ * Seeks to the shadow table's key prefix and picks the first row found.
+ * Returns SQLITE4_DONE if no row found (table is empty).
+*/
 static int diskAnnSelectRandomShadowRow(DiskAnnIndex *pIndex, u64 *pRowid){
   int rc;
-  sqlite4_stmt *pStmt = NULL;
-  char *zSql = NULL;
+  KVCursor *pCsr = NULL;
+  const KVByteArray *pKey;
+  KVSize nKey;
 
-  zSql = sqlite4MPrintf(
-      pIndex->db,
-      "SELECT index_key FROM \"%w\".%s LIMIT 1 OFFSET ABS(RANDOM()) %% MAX((SELECT COUNT(*) FROM \"%w\".%s), 1)",
-      pIndex->zDbSName, pIndex->zShadow, pIndex->zDbSName, pIndex->zShadow
-  );
-  if( zSql == NULL ){
-    rc = SQLITE4_NOMEM;
-    goto out;
-  }
-  rc = sqlite4_prepare(pIndex->db, zSql, -1, &pStmt, NULL);
-  sqlite4DbFree(pIndex->db, zSql);
-  zSql = NULL;
-  if( rc != SQLITE4_OK ){
-    goto out;
-  }
-  rc = sqlite4_step(pStmt);
-  if( rc != SQLITE4_ROW ){
-    goto out;
+  if( pIndex->nShadowRows <= 0 ){
+    /* No rows known yet — try seeking to first row to check if table is empty */
+    rc = sqlite4KVStoreOpenCursor(pIndex->db->aDb[0].pKV, &pCsr);
+    if( rc != SQLITE4_OK ) return rc;
+
+    rc = sqlite4KVCursorSeek(pCsr, pIndex->aKeyPrefix, pIndex->nKeyPrefix, 1);
+    if( rc == SQLITE4_NOTFOUND ){
+      sqlite4KVCursorClose(pCsr);
+      return SQLITE4_DONE;
+    }
+    if( rc != SQLITE4_OK && rc != SQLITE4_INEXACT ){
+      sqlite4KVCursorClose(pCsr);
+      return rc;
+    }
+
+    rc = sqlite4KVCursorKey(pCsr, &pKey, &nKey);
+    if( rc != SQLITE4_OK ){
+      sqlite4KVCursorClose(pCsr);
+      return rc;
+    }
+    if( nKey <= pIndex->nKeyPrefix ||
+        memcmp(pKey, pIndex->aKeyPrefix, pIndex->nKeyPrefix) != 0 ){
+      sqlite4KVCursorClose(pCsr);
+      return SQLITE4_DONE;
+    }
+
+    /* Decode the first rowid as fallback */
+    {
+      sqlite4_num num;
+      int decRc = sqlite4VdbeDecodeNumericKey(
+          pKey + pIndex->nKeyPrefix,
+          nKey - pIndex->nKeyPrefix,
+          &num);
+      if( decRc <= 0 ){
+        sqlite4KVCursorClose(pCsr);
+        return SQLITE4_ERROR;
+      }
+      *pRowid = (u64)sqlite4_num_to_int64(num, 0);
+    }
+    sqlite4KVCursorClose(pCsr);
+    return SQLITE4_OK;
   }
 
-  *pRowid = (u64)sqlite4_column_int64(pStmt, 0);
-  assert( sqlite4_step(pStmt) == SQLITE4_DONE );
-  rc = SQLITE4_OK;
+  /* Pick a random rowid in [1, nShadowRows] and seek to nearest existing row */
+  {
+    u64 randVal;
+    u8 aKey[32];
+    int nKey2;
+    i64 targetRowid;
 
-out:
-  if( pStmt != NULL ){
-    sqlite4_finalize(pStmt);
+    sqlite4_randomness(pIndex->db->pEnv, sizeof(randVal), &randVal);
+    targetRowid = (i64)(randVal % (u64)pIndex->nShadowRows) + 1;
+
+    nKey2 = blobSpotBuildKey(pIndex, targetRowid, aKey);
+
+    rc = sqlite4KVStoreOpenCursor(pIndex->db->aDb[0].pKV, &pCsr);
+    if( rc != SQLITE4_OK ) return rc;
+
+    /* Seek to nearest key >= target (dir=1) */
+    rc = sqlite4KVCursorSeek(pCsr, aKey, nKey2, 1);
+    if( rc == SQLITE4_NOTFOUND ){
+      /* Overshot past end — wrap to first row */
+      rc = sqlite4KVCursorSeek(pCsr, pIndex->aKeyPrefix, pIndex->nKeyPrefix, 1);
+    }
+    if( rc != SQLITE4_OK && rc != SQLITE4_INEXACT ){
+      sqlite4KVCursorClose(pCsr);
+      return rc;
+    }
+
+    rc = sqlite4KVCursorKey(pCsr, &pKey, &nKey);
+    if( rc != SQLITE4_OK ){
+      sqlite4KVCursorClose(pCsr);
+      return rc;
+    }
+
+    /* Verify it belongs to this shadow table */
+    if( nKey <= pIndex->nKeyPrefix ||
+        memcmp(pKey, pIndex->aKeyPrefix, pIndex->nKeyPrefix) != 0 ){
+      /* Wrapped past shadow table — seek back to first row */
+      rc = sqlite4KVCursorSeek(pCsr, pIndex->aKeyPrefix, pIndex->nKeyPrefix, 1);
+      if( rc == SQLITE4_NOTFOUND ){
+        sqlite4KVCursorClose(pCsr);
+        return SQLITE4_DONE;
+      }
+      if( rc != SQLITE4_OK && rc != SQLITE4_INEXACT ){
+        sqlite4KVCursorClose(pCsr);
+        return rc;
+      }
+      rc = sqlite4KVCursorKey(pCsr, &pKey, &nKey);
+      if( rc != SQLITE4_OK ){
+        sqlite4KVCursorClose(pCsr);
+        return rc;
+      }
+    }
+
+    /* Decode the rowid */
+    {
+      sqlite4_num num;
+      int decRc = sqlite4VdbeDecodeNumericKey(
+          pKey + pIndex->nKeyPrefix,
+          nKey - pIndex->nKeyPrefix,
+          &num);
+      if( decRc <= 0 ){
+        sqlite4KVCursorClose(pCsr);
+        return SQLITE4_ERROR;
+      }
+      *pRowid = (u64)sqlite4_num_to_int64(num, 0);
+    }
+
+    sqlite4KVCursorClose(pCsr);
+    return SQLITE4_OK;
   }
-  if( zSql != NULL ){
-    sqlite4DbFree(pIndex->db, zSql);
-  }
-  return rc;
 }
 
 /*

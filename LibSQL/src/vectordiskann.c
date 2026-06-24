@@ -731,20 +731,15 @@ int diskAnnDropIndex(sqlite3 *db, const char *zDbSName, const char *zIdxName){
   return rc;
 }
 
-/*
- * Select random row from the shadow table and set its rowid to pRowid
- * returns SQLITE_DONE if no row found (this will be used to determine case when table is empty)
- * TODO: we need to make this selection procedure faster - now it works in linear time
-*/
-static int diskAnnSelectRandomShadowRow(const DiskAnnIndex *pIndex, u64 *pRowid){
+static int diskAnnLoadShadowMaxRowid(DiskAnnIndex *pIndex){
   int rc;
   sqlite3_stmt *pStmt = NULL;
   char *zSql = NULL;
 
   zSql = sqlite3MPrintf(
     pIndex->db,
-    "SELECT rowid FROM \"%w\".%s LIMIT 1 OFFSET ABS(RANDOM()) %% MAX((SELECT COUNT(*) FROM \"%w\".%s), 1)",
-    pIndex->zDbSName, pIndex->zShadow, pIndex->zDbSName, pIndex->zShadow
+    "SELECT MAX(rowid) FROM \"%w\".%s",
+    pIndex->zDbSName, pIndex->zShadow
   );
   if( zSql == NULL ){
     rc = SQLITE_NOMEM_BKPT;
@@ -758,13 +753,94 @@ static int diskAnnSelectRandomShadowRow(const DiskAnnIndex *pIndex, u64 *pRowid)
   if( rc != SQLITE_ROW ){
     goto out;
   }
+  if( sqlite3_column_type(pStmt, 0) == SQLITE_NULL ){
+    pIndex->nShadowMaxRowid = 0;
+    rc = SQLITE_DONE;
+    goto out;
+  }
+  pIndex->nShadowMaxRowid = sqlite3_column_int64(pStmt, 0);
+  rc = SQLITE_OK;
+
+out:
+  if( pStmt != NULL ){
+    sqlite3_finalize(pStmt);
+  }
+  if( zSql != NULL ){
+    sqlite3DbFree(pIndex->db, zSql);
+  }
+  return rc;
+}
+
+/*
+ * Select random row from the shadow table and set its rowid to pRowid.
+ * Uses the same random-target + nearest-key seek shape as LSMobiVec.
+*/
+static int diskAnnSelectRandomShadowRow(DiskAnnIndex *pIndex, u64 *pRowid){
+  int rc;
+  sqlite3_stmt *pStmt = NULL;
+  char *zSql = NULL;
+  u64 randVal;
+  sqlite3_int64 targetRowid;
+
+  if( pIndex->nShadowMaxRowid <= 0 ){
+    rc = diskAnnLoadShadowMaxRowid(pIndex);
+    if( rc == SQLITE_DONE ){
+      return SQLITE_DONE;
+    }
+    if( rc != SQLITE_OK ){
+      return rc;
+    }
+  }
+
+  sqlite3_randomness(sizeof(randVal), &randVal);
+  targetRowid = (sqlite3_int64)(randVal % (u64)pIndex->nShadowMaxRowid) + 1;
+
+  zSql = sqlite3MPrintf(
+    pIndex->db,
+    "SELECT rowid FROM \"%w\".%s WHERE rowid >= ? ORDER BY rowid LIMIT 1",
+    pIndex->zDbSName, pIndex->zShadow
+  );
+  if( zSql == NULL ){
+    rc = SQLITE_NOMEM_BKPT;
+    goto out;
+  }
+  rc = sqlite3_prepare_v2(pIndex->db, zSql, -1, &pStmt, 0);
+  if( rc != SQLITE_OK ){
+    goto out;
+  }
+  rc = sqlite3_bind_int64(pStmt, 1, targetRowid);
+  if( rc != SQLITE_OK ){
+    goto out;
+  }
+  rc = sqlite3_step(pStmt);
+  if( rc == SQLITE_DONE ){
+    sqlite3_finalize(pStmt);
+    pStmt = NULL;
+    sqlite3DbFree(pIndex->db, zSql);
+    zSql = sqlite3MPrintf(
+      pIndex->db,
+      "SELECT rowid FROM \"%w\".%s ORDER BY rowid LIMIT 1",
+      pIndex->zDbSName, pIndex->zShadow
+    );
+    if( zSql == NULL ){
+      rc = SQLITE_NOMEM_BKPT;
+      goto out;
+    }
+    rc = sqlite3_prepare_v2(pIndex->db, zSql, -1, &pStmt, 0);
+    if( rc != SQLITE_OK ){
+      goto out;
+    }
+    rc = sqlite3_step(pStmt);
+  }
+  if( rc != SQLITE_ROW ){
+    goto out;
+  }
 
   assert( sqlite3_column_type(pStmt, 0) == SQLITE_INTEGER );
   *pRowid = sqlite3_column_int64(pStmt, 0);
-
-  // check that we has only single row matching the criteria (otherwise - this is a bug)
   assert( sqlite3_step(pStmt) == SQLITE_DONE );
   rc = SQLITE_OK;
+
 out:
   if( pStmt != NULL ){
     sqlite3_finalize(pStmt);
@@ -891,7 +967,7 @@ out:
 /*
  * Insert new empty row to the shadow table and set new rowid to the pRowid (data will be zeroe-filled blob of size pIndex->nBlockSize)
 */
-static int diskAnnInsertShadowRow(const DiskAnnIndex *pIndex, const VectorInRow *pVectorInRow, u64 *pRowid){
+static int diskAnnInsertShadowRow(DiskAnnIndex *pIndex, const VectorInRow *pVectorInRow, u64 *pRowid){
   int rc, i;
   sqlite3_stmt *pStmt = NULL;
   char *zSql = NULL;
@@ -939,6 +1015,9 @@ static int diskAnnInsertShadowRow(const DiskAnnIndex *pIndex, const VectorInRow 
 
   // check that we has only single row matching the criteria (otherwise - this is a bug)
   assert( sqlite3_step(pStmt) == SQLITE_DONE );
+  if( (i64)*pRowid > pIndex->nShadowMaxRowid ){
+    pIndex->nShadowMaxRowid = (i64)*pRowid;
+  }
   rc = SQLITE_OK;
 out:
   if( pStmt != NULL ){
@@ -953,7 +1032,7 @@ out:
 /*
  * Delete row from the shadow table
 */
-static int diskAnnDeleteShadowRow(const DiskAnnIndex *pIndex, i64 nRowid){
+static int diskAnnDeleteShadowRow(DiskAnnIndex *pIndex, i64 nRowid){
   int rc;
   sqlite3_stmt *pStmt = NULL;
   char *zSql = sqlite3MPrintf(
@@ -976,6 +1055,9 @@ static int diskAnnDeleteShadowRow(const DiskAnnIndex *pIndex, i64 nRowid){
   rc = sqlite3_step(pStmt);
   if( rc != SQLITE_DONE ){
     goto out;
+  }
+  if( nRowid >= pIndex->nShadowMaxRowid ){
+    pIndex->nShadowMaxRowid = 0;
   }
   rc = SQLITE_OK;
 out:
@@ -1990,6 +2072,7 @@ int diskAnnOpenIndex(
   pIndex->pruningAlpha = vectorIdxParamsGetF64(pParams, VECTOR_PRUNING_ALPHA_PARAM_ID);
   pIndex->insertL = vectorIdxParamsGetU64(pParams, VECTOR_INSERT_L_PARAM_ID);
   pIndex->searchL = vectorIdxParamsGetU64(pParams, VECTOR_SEARCH_L_PARAM_ID);
+  pIndex->nShadowMaxRowid = 0;
   pIndex->nReads = 0;
   pIndex->nWrites = 0;
   if( pIndex->nDistanceFunc == 0 ||
