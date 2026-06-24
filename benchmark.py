@@ -627,7 +627,8 @@ def format_io_summary(io_stats):
 def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                    gt_results, k, db_dir, is_sqlite3=False, use_compaction=True,
                    do_drop_cache=False, io_log_dir=None,
-                   page_size_kb=None, lsm_compression="none", disk_device=DISK_DEVICE):
+                   page_size_kb=None, lsm_compression="none", disk_device=DISK_DEVICE,
+                   query_only=False):
     db_path = os.path.join(db_dir, f"bench_{label}.db")
     db_target = build_db_target(
         db_path,
@@ -636,13 +637,16 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         lsm_compression=lsm_compression,
         use_compaction=use_compaction,
     )
-    cleanup_db(db_path, is_sqlite3)
+    if not query_only:
+        cleanup_db(db_path, is_sqlite3)
+    elif not os.path.exists(db_path):
+        raise FileNotFoundError(f"query-only DB not found: {db_path}")
     child_env = os.environ.copy()
     child_env["DISKANN_IO_TIMING"] = "1"
 
     result = {"label": label}
-    need_compact = not is_sqlite3 and use_compaction and compact_bin
-    n_phases = 4 if need_compact else 3
+    need_compact = not query_only and not is_sqlite3 and use_compaction and compact_bin
+    n_phases = 2 if query_only else (4 if need_compact else 3)
 
     print(f"\n{'='*60}")
     print(f"  Config: {label}")
@@ -653,85 +657,94 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         print(f"  Compact: {compact_bin}")
     print(f"{'='*60}")
 
-    print(f"  [1/{n_phases}] Schema + Insert...")
-
-    # Keep schema and inserts in one shell session so LSM lock state and any
-    # transaction statements in the SQL file stay in their original order.
-    insert_sql = read_sql(insert_sql_path)
-    drop_caches(do_drop_cache)
-    insert_log = os.path.join(io_log_dir, f"{label}_insert_io.csv") if io_log_dir else None
-    insert_mon = DiskStatsMonitor(disk_device, log_path=insert_log).start()
-    t0 = time.time()
-    ins_out, ins_err, ins_time = run_shell(shell, db_target, insert_sql, env=child_env)
-    t_insert = time.time() - t0
-    result["insert_disk_io"] = insert_mon.stop()
-
-    # Check for silent SQL errors (shell continues past errors but sets gHasError)
-    err_lines = [l for l in ins_err.splitlines() if l.startswith("Error:")]
-    if err_lines:
-        print(f"        !! {len(err_lines)} SQL errors during schema/insert:")
-        for l in err_lines[:5]:
-            print(f"           {l}")
-        if len(err_lines) > 5:
-            print(f"           ... ({len(err_lines)-5} more)")
-        raise RuntimeError(f"schema/insert phase had {len(err_lines)} SQL errors")
-
     size_before = file_size_mb(db_path)
-    result["insert_time_s"] = round(t_insert, 2)
     result["insert_size_mb"] = round(size_before, 1)
-    result["insert_time_stats"] = ins_time
-    ins_stats = parse_diskann_stats(ins_err)
-    result["ins_stats"] = ins_stats
-    print(f"        {t_insert:.1f}s, {size_before:.1f} MB")
-    if ins_time:
-        print(
-            f"        time: real={ins_time.get('real_s', 0):.2f}s  "
-            f"user={ins_time.get('user_s', 0):.2f}s  "
-            f"sys={ins_time.get('sys_s', 0):.2f}s"
-        )
-    if ins_stats.get('build_total_ms') is not None:
-        stmt_s = ins_stats.get('insert_stmt_total_ms', 0) / 1000
-        finish_s = ins_stats.get('insert_stmt_finish_ms', 0) / 1000
-        wal_s = ins_stats.get('step_wal_ms', 0) / 1000
-        build_s = ins_stats.get('build_total_ms', 0) / 1000
-        shadow_s = ins_stats.get('shadow_insert_ms', 0) / 1000
-        graph_s = ins_stats.get('graph_build_ms', 0) / 1000
-        traversal_s = ins_stats.get('build_traversal_ms', 0) / 1000
-        edge_update_s = ins_stats.get('build_edge_update_ms', 0) / 1000
-        read_s = ins_stats.get('build_read_ms', 0) / 1000
-        write_s = ins_stats.get('build_write_ms', 0) / 1000
-        dist_s = ins_stats.get('build_dist_ms', 0) / 1000
-        lsm_s = ins_stats.get('build_lsm_ms', 0) / 1000
-        print(
-            f"        Stmt={stmt_s:.1f}s  Commit={finish_s:.1f}s  "
-            f"Checkpt={wal_s:.1f}s  VecBuild={build_s:.1f}s  "
-            f"Shadow={shadow_s:.1f}s  GraphBuild={graph_s:.1f}s  "
-            f"BuildTrav={traversal_s:.1f}s  EdgeUpd={edge_update_s:.1f}s  "
-            f"ReadPath={read_s:.1f}s  WritePath={write_s:.1f}s  Dist={dist_s:.1f}s  "
-            f"LSMWork={lsm_s:.1f}s"
-        )
-        if ins_stats.get('step_api_ms') is not None:
+    result["insert_time_s"] = 0.0
+    result["insert_time_stats"] = {}
+    result["ins_stats"] = {}
+
+    if query_only:
+        print(f"  Using existing DB: {db_path} ({size_before:.1f} MB)")
+    else:
+        print(f"  [1/{n_phases}] Schema + Insert...")
+
+        # Keep schema and inserts in one shell session so LSM lock state and any
+        # transaction statements in the SQL file stay in their original order.
+        insert_sql = read_sql(insert_sql_path)
+        drop_caches(do_drop_cache)
+        insert_log = os.path.join(io_log_dir, f"{label}_insert_io.csv") if io_log_dir else None
+        insert_mon = DiskStatsMonitor(disk_device, log_path=insert_log).start()
+        t0 = time.time()
+        ins_out, ins_err, ins_time = run_shell(shell, db_target, insert_sql, env=child_env)
+        t_insert = time.time() - t0
+        result["insert_disk_io"] = insert_mon.stop()
+
+        # Check for silent SQL errors (shell continues past errors but sets gHasError)
+        err_lines = [l for l in ins_err.splitlines() if l.startswith("Error:")]
+        if err_lines:
+            print(f"        !! {len(err_lines)} SQL errors during schema/insert:")
+            for l in err_lines[:5]:
+                print(f"           {l}")
+            if len(err_lines) > 5:
+                print(f"           ... ({len(err_lines)-5} more)")
+            raise RuntimeError(f"schema/insert phase had {len(err_lines)} SQL errors")
+
+        size_before = file_size_mb(db_path)
+        result["insert_time_s"] = round(t_insert, 2)
+        result["insert_size_mb"] = round(size_before, 1)
+        result["insert_time_stats"] = ins_time
+        ins_stats = parse_diskann_stats(ins_err)
+        result["ins_stats"] = ins_stats
+        print(f"        {t_insert:.1f}s, {size_before:.1f} MB")
+        if ins_time:
             print(
-                f"        StepApi={ins_stats.get('step_api_ms', 0)/1000:.1f}s  "
-                f"StepCore={ins_stats.get('step_core_ms', 0)/1000:.1f}s  "
-                f"StepExec={ins_stats.get('step_vdbe_exec_ms', 0)/1000:.1f}s  "
-                f"StepReady={ins_stats.get('step_ready_ms', 0)/1000:.1f}s  "
-                f"StepAutoReset={ins_stats.get('step_auto_reset_ms', 0)/1000:.1f}s  "
-                f"StepReset={ins_stats.get('step_reset_ms', 0)/1000:.1f}s  "
-                f"StepReprep={ins_stats.get('step_reprepare_ms', 0)/1000:.1f}s"
+                f"        time: real={ins_time.get('real_s', 0):.2f}s  "
+                f"user={ins_time.get('user_s', 0):.2f}s  "
+                f"sys={ins_time.get('sys_s', 0):.2f}s"
             )
+        if ins_stats.get('build_total_ms') is not None:
+            stmt_s = ins_stats.get('insert_stmt_total_ms', 0) / 1000
+            finish_s = ins_stats.get('insert_stmt_finish_ms', 0) / 1000
+            wal_s = ins_stats.get('step_wal_ms', 0) / 1000
+            build_s = ins_stats.get('build_total_ms', 0) / 1000
+            shadow_s = ins_stats.get('shadow_insert_ms', 0) / 1000
+            graph_s = ins_stats.get('graph_build_ms', 0) / 1000
+            traversal_s = ins_stats.get('build_traversal_ms', 0) / 1000
+            edge_update_s = ins_stats.get('build_edge_update_ms', 0) / 1000
+            read_s = ins_stats.get('build_read_ms', 0) / 1000
+            write_s = ins_stats.get('build_write_ms', 0) / 1000
+            dist_s = ins_stats.get('build_dist_ms', 0) / 1000
+            lsm_s = ins_stats.get('build_lsm_ms', 0) / 1000
             print(
-                f"        StepMutex={ins_stats.get('step_mutex_enter_ms', 0)/1000:.1f}s/"
-                f"{ins_stats.get('step_mutex_leave_ms', 0)/1000:.1f}s  "
-                f"StepProfile={ins_stats.get('step_profile_ms', 0)/1000:.1f}s  "
-                f"StepWal={ins_stats.get('step_wal_ms', 0)/1000:.1f}s  "
-                f"StepXfer={ins_stats.get('step_transfer_ms', 0)/1000:.1f}s  "
-                f"StepApiExit={ins_stats.get('step_api_exit_ms', 0)/1000:.1f}s  "
-                f"StepOther={ins_stats.get('step_wrapper_other_ms', 0)/1000:.1f}s"
+                f"        Stmt={stmt_s:.1f}s  Commit={finish_s:.1f}s  "
+                f"Checkpt={wal_s:.1f}s  VecBuild={build_s:.1f}s  "
+                f"Shadow={shadow_s:.1f}s  GraphBuild={graph_s:.1f}s  "
+                f"BuildTrav={traversal_s:.1f}s  EdgeUpd={edge_update_s:.1f}s  "
+                f"ReadPath={read_s:.1f}s  WritePath={write_s:.1f}s  Dist={dist_s:.1f}s  "
+                f"LSMWork={lsm_s:.1f}s"
             )
-    print(f"        {format_io_summary(result['insert_disk_io'])}")
-    for block in extract_c_stat_blocks(ins_err):
-        print(block)
+            if ins_stats.get('step_api_ms') is not None:
+                print(
+                    f"        StepApi={ins_stats.get('step_api_ms', 0)/1000:.1f}s  "
+                    f"StepCore={ins_stats.get('step_core_ms', 0)/1000:.1f}s  "
+                    f"StepExec={ins_stats.get('step_vdbe_exec_ms', 0)/1000:.1f}s  "
+                    f"StepReady={ins_stats.get('step_ready_ms', 0)/1000:.1f}s  "
+                    f"StepAutoReset={ins_stats.get('step_auto_reset_ms', 0)/1000:.1f}s  "
+                    f"StepReset={ins_stats.get('step_reset_ms', 0)/1000:.1f}s  "
+                    f"StepReprep={ins_stats.get('step_reprepare_ms', 0)/1000:.1f}s"
+                )
+                print(
+                    f"        StepMutex={ins_stats.get('step_mutex_enter_ms', 0)/1000:.1f}s/"
+                    f"{ins_stats.get('step_mutex_leave_ms', 0)/1000:.1f}s  "
+                    f"StepProfile={ins_stats.get('step_profile_ms', 0)/1000:.1f}s  "
+                    f"StepWal={ins_stats.get('step_wal_ms', 0)/1000:.1f}s  "
+                    f"StepXfer={ins_stats.get('step_transfer_ms', 0)/1000:.1f}s  "
+                    f"StepApiExit={ins_stats.get('step_api_exit_ms', 0)/1000:.1f}s  "
+                    f"StepOther={ins_stats.get('step_wrapper_other_ms', 0)/1000:.1f}s"
+                )
+        print(f"        {format_io_summary(result['insert_disk_io'])}")
+        for block in extract_c_stat_blocks(ins_err):
+            print(block)
 
     # Compact (LSMobiVec only)
     if need_compact:
@@ -764,7 +777,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         result["compact_size_mb"] = round(size_before, 1)
 
     # Query (timed)
-    phase_q = 3 if need_compact else 2
+    phase_q = 1 if query_only else (3 if need_compact else 2)
     print(f"  [{phase_q}/{n_phases}] Querying...")
     query_sql = read_sql(query_sql_path)
 
@@ -879,6 +892,8 @@ def main():
                         help="Block device name from /proc/diskstats, or 'auto' to detect from --db-dir")
     parser.add_argument("--io-log-dir", type=str, default="./io_logs",
                         help="Directory to store disk I/O CSV logs")
+    parser.add_argument("--query-only", action="store_true",
+                        help="Run query and recall only using existing bench_*.db files")
     args = parser.parse_args()
 
     page_sizes_kb = [int(x) for x in args.page_sizes.split(",")]
@@ -893,7 +908,8 @@ def main():
         insert_sql = os.path.join(args.dataset_dir, f"insert100k_{name}.sql")
         query_sql = os.path.join(args.dataset_dir, f"query10k_{name}.sql")
         gt_file = os.path.join(args.dataset_dir, f"groundtruth_{name}.txt")
-        missing = [f for f in [insert_sql, query_sql, gt_file] if not os.path.isfile(f)]
+        required = [query_sql, gt_file] if args.query_only else [insert_sql, query_sql, gt_file]
+        missing = [f for f in required if not os.path.isfile(f)]
         if missing:
             print(f"Warning: skipping dataset '{name}', missing: {missing}")
             continue
@@ -958,32 +974,34 @@ def main():
         ds_results = []
         for label, shell, compact_bin, is_s3, ps_kb in configs:
             run_label = f"{ds_name}_{label}"
-            insert_sql_text = read_sql(insert_sql)
-            prepared_sql = prepare_insert_sql(
-                insert_sql_text,
-                ps_kb,
-                is_sqlite3=is_s3,
-                use_compaction=use_compaction,
-                lsm_autoflush_mb=args.lsm_autoflush_mb,
-            )
-            insert_sql_prepared = os.path.join(args.db_dir, f".schema_{run_label}.sql")
-            with open(insert_sql_prepared, "w") as f:
-                f.write(prepared_sql + "\n")
+            insert_sql_prepared = None
+            if not args.query_only:
+                insert_sql_text = read_sql(insert_sql)
+                prepared_sql = prepare_insert_sql(
+                    insert_sql_text,
+                    ps_kb,
+                    is_sqlite3=is_s3,
+                    use_compaction=use_compaction,
+                    lsm_autoflush_mb=args.lsm_autoflush_mb,
+                )
+                insert_sql_prepared = os.path.join(args.db_dir, f".schema_{run_label}.sql")
+                with open(insert_sql_prepared, "w") as f:
+                    f.write(prepared_sql + "\n")
             result = run_one_config(
                 run_label, shell, compact_bin, insert_sql_prepared, query_sql,
                 gt_results, args.k, args.db_dir, is_sqlite3=is_s3,
                 use_compaction=use_compaction, do_drop_cache=args.drop_cache,
                 io_log_dir=args.io_log_dir, page_size_kb=ps_kb,
-                lsm_compression=args.lsm_compression, disk_device=disk_device
+                lsm_compression=args.lsm_compression, disk_device=disk_device,
+                query_only=args.query_only
             )
             ds_results.append(result)
 
-            # Clean up DB after results are recorded to free disk space
+            # Keep the generated DB so it can be inspected after the benchmark.
             db_path = os.path.join(args.db_dir, f"bench_{run_label}.db")
-            cleanup_db(db_path, is_sqlite3=is_s3)
-            if os.path.exists(insert_sql_prepared):
+            if insert_sql_prepared and os.path.exists(insert_sql_prepared):
                 os.remove(insert_sql_prepared)
-            print(f"  Cleaned up {db_path}")
+            print(f"  Kept DB {db_path}")
 
         all_results[ds_name] = ds_results
 
