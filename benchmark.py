@@ -571,19 +571,11 @@ def parse_diskann_stats(stderr_text):
     grab(r'result collect:\s*([\d.]+)\s+ms', 'result_ms')
     grab(r'context deinit:\s*([\d.]+)\s+ms', 'ctx_deinit_ms')
     grab(r'diskAnn other:\s*([\d.]+)\s+ms', 'diskann_other_ms')
-    grab(r'vtab open:\s*([\d.]+)\s+ms', 'vtab_open_ms')
-    grab(r'vtab filter:\s*([\d.]+)\s+ms', 'vtab_filter_ms')
-    grab(r'vtab next:\s*([\d.]+)\s+ms', 'vtab_next_ms')
-    grab(r'vtab column:\s*([\d.]+)\s+ms', 'vtab_column_ms')
-    grab(r'vtab rowid:\s*([\d.]+)\s+ms', 'vtab_rowid_ms')
-    grab(r'vtab close:\s*([\d.]+)\s+ms', 'vtab_close_ms')
     grab(r'vector search total:\s*([\d.]+)\s+ms', 'vector_search_total_ms')
     grab(r'vector parse:\s*([\d.]+)\s+ms', 'vector_parse_ms')
     grab(r'index lookup/open:\s*([\d.]+)\s+ms', 'index_lookup_ms')
     grab(r'diskAnn call:\s*([\d.]+)\s+ms', 'diskann_call_ms')
     grab(r'vector cleanup:\s*([\d.]+)\s+ms', 'vector_cleanup_ms')
-    grab(r'vfs read syscall:\s*([\d.]+)\s+ms', 'file_read_ms')
-    grab(r'lsm file read syscall:\s*([\d.]+)\s+ms', 'file_read_ms')
     grab(r'([\d.]+)\s+q/s', 'qps')
     return stats
 
@@ -597,11 +589,7 @@ def extract_c_stat_blocks(stderr_text):
 
     for line in lines:
         stripped = line.rstrip()
-        if (
-            stripped.startswith("=== diskAnn ")
-            or stripped == "=== VFS read timing ==="
-            or stripped == "=== LSM file read timing ==="
-        ) and stripped.endswith("==="):
+        if stripped.startswith("=== diskAnn ") and stripped.endswith("==="):
             if cur:
                 blocks.append("\n".join(cur))
                 cur = []
@@ -823,13 +811,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
             f"Result={q_stats.get('result_ms', 0):.0f}ms  "
             f"CtxDeinit={q_stats.get('ctx_deinit_ms', 0):.0f}ms"
         )
-        print(
-            f"        DiskAnnOther={q_stats.get('diskann_other_ms', 0):.0f}ms  "
-            f"VTabFilter={q_stats.get('vtab_filter_ms', 0):.0f}ms  "
-            f"VTabNext={q_stats.get('vtab_next_ms', 0):.0f}ms  "
-            f"VTabColumn={q_stats.get('vtab_column_ms', 0):.0f}ms  "
-            f"VTabRowid={q_stats.get('vtab_rowid_ms', 0):.0f}ms"
-        )
+        print(f"        DiskAnnOther={q_stats.get('diskann_other_ms', 0):.0f}ms")
         if q_stats.get('blob_read_call_ms') or q_stats.get('kv_seek_ms'):
             print(
                 f"        BlobOpen={q_stats.get('blob_open_ms', 0):.0f}ms  "
@@ -848,8 +830,6 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                 f"DiskAnnCall={q_stats.get('diskann_call_ms', 0):.0f}ms  "
                 f"VecCleanup={q_stats.get('vector_cleanup_ms', 0):.0f}ms"
             )
-        if q_stats.get('file_read_ms'):
-            print(f"        FileRead={q_stats.get('file_read_ms', 0):.0f}ms")
     print(f"        {format_io_summary(result['query_disk_io'])}")
     for block in extract_c_stat_blocks(q_err):
         print(block)

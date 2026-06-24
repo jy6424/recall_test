@@ -34,48 +34,9 @@
 
 #include <unistd.h>
 #include <errno.h>
-#include <sys/time.h>
 
 #include <sys/mman.h>
 #include "lsmInt.h"
-
-static int g_diskAnnLsmFileTimingEnabled = -1;
-static int g_diskAnnLsmFileTimingAtexit = 0;
-static double g_diskAnnLsmFileReadMs = 0.0;
-static long long g_diskAnnLsmFileReadBytes = 0;
-static int g_diskAnnLsmFileReadCalls = 0;
-
-static int diskAnnLsmFileTimingEnabled(void){
-  if( g_diskAnnLsmFileTimingEnabled < 0 ){
-    const char *zEnv = getenv("DISKANN_IO_TIMING");
-    g_diskAnnLsmFileTimingEnabled =
-      (zEnv && zEnv[0] && zEnv[0] != '0') ? 1 : 0;
-  }
-  return g_diskAnnLsmFileTimingEnabled;
-}
-
-static double diskAnnLsmFileNowMs(void){
-  struct timeval tv;
-  gettimeofday(&tv, 0);
-  return (double)tv.tv_sec*1000.0 + (double)tv.tv_usec/1000.0;
-}
-
-static void diskAnnLsmFileReadTimingPrint(void){
-  if( g_diskAnnLsmFileReadCalls > 0 ){
-    fprintf(stderr, "\n=== LSM file read timing ===\n");
-    fprintf(stderr, "  lsm file read syscall:%7.1f ms  (%d calls, %lld bytes)\n",
-            g_diskAnnLsmFileReadMs, g_diskAnnLsmFileReadCalls,
-            (long long)g_diskAnnLsmFileReadBytes);
-    fprintf(stderr, "================================================\n");
-  }
-}
-
-static void diskAnnLsmFileReadTimingRegister(void){
-  if( !g_diskAnnLsmFileTimingAtexit ){
-    atexit(diskAnnLsmFileReadTimingPrint);
-    g_diskAnnLsmFileTimingAtexit = 1;
-  }
-}
 
 /* There is no fdatasync() call on Android */
 #ifdef __ANDROID__
@@ -190,25 +151,13 @@ static int lsmPosixOsRead(
   int rc = LSM_OK;
   PosixFile *p = (PosixFile *)pFile;
   off_t offset;
-  int doTiming;
   ssize_t prc;
-  double fileReadStartMs = 0.0;
 
   offset = lseek(p->fd, (off_t)iOff, SEEK_SET);
   if( offset!=iOff ){
     rc = LSM_IOERR_BKPT;
   }else{
-    doTiming = diskAnnLsmFileTimingEnabled();
-    if( doTiming ){
-      diskAnnLsmFileReadTimingRegister();
-      fileReadStartMs = diskAnnLsmFileNowMs();
-    }
     prc = read(p->fd, pData, (size_t)nData);
-    if( doTiming ){
-      g_diskAnnLsmFileReadMs += diskAnnLsmFileNowMs() - fileReadStartMs;
-      g_diskAnnLsmFileReadCalls++;
-      if( prc > 0 ) g_diskAnnLsmFileReadBytes += prc;
-    }
     if( prc<0 ){ 
       rc = LSM_IOERR_BKPT;
     }else if( prc<nData ){

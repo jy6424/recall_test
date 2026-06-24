@@ -25,23 +25,9 @@
 ** libSQL vector search.
 */
 #if !defined(SQLITE_OMIT_VECTOR) && !defined(SQLITE_OMIT_VIRTUALTABLE)
-#include <time.h>
 #include "sqlite3.h"
 #include "vdbeInt.h"
 #include "vectorIndexInt.h"
-
-void diskAnnRecordVtabOpen(double ms);
-void diskAnnRecordVtabClose(double ms);
-void diskAnnRecordVtabFilter(double ms);
-void diskAnnRecordVtabNext(double ms);
-void diskAnnRecordVtabColumn(double ms);
-void diskAnnRecordVtabRowid(double ms);
-
-static double vectorVtabNowMs(void){
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts.tv_sec*1000.0 + ts.tv_nsec/1e6;
-}
 
 typedef struct vectorVtab vectorVtab;
 struct vectorVtab {
@@ -104,33 +90,26 @@ static int vectorVtabDisconnect(sqlite3_vtab *pVtab){
 static int vectorVtabOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **ppCursor){
   vectorVtab *pVTab = (vectorVtab*)p;
   vectorVtab_cursor *pCur;
-  double t0 = vectorVtabNowMs();
   pCur = sqlite3_malloc( sizeof(vectorVtab_cursor) );
   if( pCur == NULL ){
-    diskAnnRecordVtabOpen(vectorVtabNowMs() - t0);
     return SQLITE_NOMEM;
   }
   memset(pCur, 0, sizeof(*pCur));
   *ppCursor = &pCur->base;
-  diskAnnRecordVtabOpen(vectorVtabNowMs() - t0);
   return SQLITE_OK;
 }
 
 static int vectorVtabClose(sqlite3_vtab_cursor *cur){
   vectorVtab_cursor *pCur = (vectorVtab_cursor*)cur;
   vectorVtab *pVTab = (vectorVtab *)cur->pVtab;
-  double t0 = vectorVtabNowMs();
   vectorOutRowsFree(pVTab->db, &pCur->rows);
   sqlite3_free(pCur);
-  diskAnnRecordVtabClose(vectorVtabNowMs() - t0);
   return SQLITE_OK;
 }
 
 static int vectorVtabNext(sqlite3_vtab_cursor *cur){
   vectorVtab_cursor *pCur = (vectorVtab_cursor*)cur;
-  double t0 = vectorVtabNowMs();
   pCur->iRow++;
-  diskAnnRecordVtabNext(vectorVtabNowMs() - t0);
   return SQLITE_OK;
 }
 
@@ -145,22 +124,18 @@ static int vectorVtabColumn(
   int iCol                    /* Which column to return */
 ){
   vectorVtab_cursor *pCur = (vectorVtab_cursor*)cur;
-  double t0 = vectorVtabNowMs();
   vectorOutRowsGet(context, &pCur->rows, pCur->iRow, iCol - VECTOR_COLUMN_OFFSET);
-  diskAnnRecordVtabColumn(vectorVtabNowMs() - t0);
   return SQLITE_OK;
 }
 
 static int vectorVtabRowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid){
   vectorVtab_cursor *pCur = (vectorVtab_cursor*)cur;
-  double t0 = vectorVtabNowMs();
   // rowid used for internal SQLite needs - so we take it if output has single integer column but in other case just return current row index
   if( pCur->rows.aIntValues != NULL ){
     *pRowid = pCur->rows.aIntValues[pCur->iRow];
   }else{
     *pRowid = pCur->iRow;
   }
-  diskAnnRecordVtabRowid(vectorVtabNowMs() - t0);
   return SQLITE_OK;
 }
 
@@ -171,19 +146,16 @@ static int vectorVtabFilter(
 ){
   vectorVtab_cursor *pCur = (vectorVtab_cursor *)pVtabCursor;
   vectorVtab *pVTab = (vectorVtab *)pVtabCursor->pVtab;
-  double t0 = vectorVtabNowMs();
   pCur->rows.aIntValues = NULL;
   pCur->rows.ppValues = NULL;
 
   if( vectorIndexSearch(pVTab->db, argc, argv, &pCur->rows, &pCur->nReads, &pCur->nWrites, &pVTab->base.zErrMsg) != 0 ){
-    diskAnnRecordVtabFilter(vectorVtabNowMs() - t0);
     return SQLITE_ERROR;
   }
 
   assert( pCur->rows.nRows >= 0 );
   assert( pCur->rows.nCols > 0 );
   pCur->iRow = 0;
-  diskAnnRecordVtabFilter(vectorVtabNowMs() - t0);
   return SQLITE_OK;
 }
 

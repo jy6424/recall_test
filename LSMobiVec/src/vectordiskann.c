@@ -70,12 +70,6 @@ static int g_queryNodesVisited = 0;     /* total nodes visited across all querie
 static long long g_queryEdgesExamined = 0; /* total edges examined */
 static double g_queryDistanceMs = 0;    /* distance computation time */
 static double g_buildDistanceMs = 0;    /* distance computation during build */
-static double g_vtabOpenMs = 0;
-static double g_vtabCloseMs = 0;
-static double g_vtabFilterMs = 0;
-static double g_vtabNextMs = 0;
-static double g_vtabColumnMs = 0;
-static double g_vtabRowidMs = 0;
 static double g_vectorSearchTotalMs = 0;
 static double g_vectorSearchParseMs = 0;
 static double g_vectorSearchLookupMs = 0;
@@ -2212,12 +2206,6 @@ static void diskAnnPrintSearchStats(void){
             g_queryCtxDeinitMs, avgCtxDeinit, g_queryCtxDeinitMs/g_queryTotalMs*100);
     fprintf(stderr, "  diskAnn other:  %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             diskAnnOther, diskAnnOther/g_queryCount, diskAnnOther/g_queryTotalMs*100);
-    fprintf(stderr, "  vtab open:      %8.1f ms\n", g_vtabOpenMs);
-    fprintf(stderr, "  vtab filter:    %8.1f ms\n", g_vtabFilterMs);
-    fprintf(stderr, "  vtab next:      %8.1f ms\n", g_vtabNextMs);
-    fprintf(stderr, "  vtab column:    %8.1f ms\n", g_vtabColumnMs);
-    fprintf(stderr, "  vtab rowid:     %8.1f ms\n", g_vtabRowidMs);
-    fprintf(stderr, "  vtab close:     %8.1f ms\n", g_vtabCloseMs);
     fprintf(stderr, "  vector search total:%5.1f ms\n", g_vectorSearchTotalMs);
     fprintf(stderr, "    vector parse: %8.1f ms\n", g_vectorSearchParseMs);
     fprintf(stderr, "    index lookup/open:%5.1f ms\n", g_vectorSearchLookupMs);
@@ -2226,13 +2214,6 @@ static void diskAnnPrintSearchStats(void){
     fprintf(stderr, "================================================\n");
   }
 }
-
-void diskAnnRecordVtabOpen(double ms){ g_vtabOpenMs += ms; }
-void diskAnnRecordVtabClose(double ms){ g_vtabCloseMs += ms; }
-void diskAnnRecordVtabFilter(double ms){ g_vtabFilterMs += ms; }
-void diskAnnRecordVtabNext(double ms){ g_vtabNextMs += ms; }
-void diskAnnRecordVtabColumn(double ms){ g_vtabColumnMs += ms; }
-void diskAnnRecordVtabRowid(double ms){ g_vtabRowidMs += ms; }
 
 void diskAnnRecordVectorSearch(double totalMs, double parseMs, double lookupMs,
                                double diskAnnMs, double closeMs){

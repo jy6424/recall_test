@@ -100,12 +100,6 @@ static int g_queryBlobReads;
 static int g_queryNodesVisited;
 static long long g_queryEdgesExamined;
 static double g_queryDistanceMs;
-static double g_vtabOpenMs;
-static double g_vtabCloseMs;
-static double g_vtabFilterMs;
-static double g_vtabNextMs;
-static double g_vtabColumnMs;
-static double g_vtabRowidMs;
 static double g_vectorSearchTotalMs;
 static double g_vectorSearchParseMs;
 static double g_vectorSearchLookupMs;
@@ -2069,12 +2063,6 @@ static void diskAnnPrintSearchStats(void){
             g_queryCtxDeinitMs, avgCtxDeinit, g_queryCtxDeinitMs/g_queryTotalMs*100);
     fprintf(stderr, "  diskAnn other:  %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             diskAnnOther, diskAnnOther/g_queryCount, diskAnnOther/g_queryTotalMs*100);
-    fprintf(stderr, "  vtab open:      %8.1f ms\n", g_vtabOpenMs);
-    fprintf(stderr, "  vtab filter:    %8.1f ms\n", g_vtabFilterMs);
-    fprintf(stderr, "  vtab next:      %8.1f ms\n", g_vtabNextMs);
-    fprintf(stderr, "  vtab column:    %8.1f ms\n", g_vtabColumnMs);
-    fprintf(stderr, "  vtab rowid:     %8.1f ms\n", g_vtabRowidMs);
-    fprintf(stderr, "  vtab close:     %8.1f ms\n", g_vtabCloseMs);
     fprintf(stderr, "  vector search total:%5.1f ms\n", g_vectorSearchTotalMs);
     fprintf(stderr, "    vector parse: %8.1f ms\n", g_vectorSearchParseMs);
     fprintf(stderr, "    index lookup/open:%5.1f ms\n", g_vectorSearchLookupMs);
@@ -2083,13 +2071,6 @@ static void diskAnnPrintSearchStats(void){
     fprintf(stderr, "================================================\n");
   }
 }
-
-void diskAnnRecordVtabOpen(double ms){ g_vtabOpenMs += ms; }
-void diskAnnRecordVtabClose(double ms){ g_vtabCloseMs += ms; }
-void diskAnnRecordVtabFilter(double ms){ g_vtabFilterMs += ms; }
-void diskAnnRecordVtabNext(double ms){ g_vtabNextMs += ms; }
-void diskAnnRecordVtabColumn(double ms){ g_vtabColumnMs += ms; }
-void diskAnnRecordVtabRowid(double ms){ g_vtabRowidMs += ms; }
 
 void diskAnnRecordVectorSearch(double totalMs, double parseMs, double lookupMs,
                                double diskAnnMs, double closeMs){

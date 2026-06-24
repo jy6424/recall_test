@@ -106,43 +106,6 @@
 # include <sys/param.h>
 #endif /* SQLITE_ENABLE_LOCKING_STYLE */
 
-static int g_diskAnnVfsTimingEnabled = -1;
-static int g_diskAnnVfsTimingAtexit = 0;
-static double g_diskAnnVfsReadMs = 0.0;
-static sqlite3_int64 g_diskAnnVfsReadBytes = 0;
-static int g_diskAnnVfsReadCalls = 0;
-
-static int diskAnnVfsTimingEnabled(void){
-  if( g_diskAnnVfsTimingEnabled < 0 ){
-    const char *zEnv = getenv("DISKANN_IO_TIMING");
-    g_diskAnnVfsTimingEnabled = (zEnv && zEnv[0] && zEnv[0] != '0') ? 1 : 0;
-  }
-  return g_diskAnnVfsTimingEnabled;
-}
-
-static double diskAnnVfsNowMs(void){
-  struct timeval tv;
-  gettimeofday(&tv, 0);
-  return (double)tv.tv_sec*1000.0 + (double)tv.tv_usec/1000.0;
-}
-
-static void diskAnnVfsReadTimingPrint(void){
-  if( g_diskAnnVfsReadCalls > 0 ){
-    fprintf(stderr, "\n=== VFS read timing ===\n");
-    fprintf(stderr, "  vfs read syscall: %8.1f ms  (%d calls, %lld bytes)\n",
-            g_diskAnnVfsReadMs, g_diskAnnVfsReadCalls,
-            (long long)g_diskAnnVfsReadBytes);
-    fprintf(stderr, "================================================\n");
-  }
-}
-
-static void diskAnnVfsReadTimingRegister(void){
-  if( !g_diskAnnVfsTimingAtexit ){
-    atexit(diskAnnVfsReadTimingPrint);
-    g_diskAnnVfsTimingAtexit = 1;
-  }
-}
-
 /*
 ** Try to determine if gethostuuid() is available based on standard
 ** macros.  This might sometimes compute the wrong value for some
@@ -3410,8 +3373,6 @@ static int unixRead(
 ){
   unixFile *pFile = (unixFile *)id;
   int got;
-  int doTiming;
-  double vfsReadStartMs = 0.0;
   assert( id );
   assert( offset>=0 );
   assert( amt>0 );
@@ -3442,17 +3403,7 @@ static int unixRead(
   }
 #endif
 
-  doTiming = diskAnnVfsTimingEnabled();
-  if( doTiming ){
-    diskAnnVfsReadTimingRegister();
-    vfsReadStartMs = diskAnnVfsNowMs();
-  }
   got = seekAndRead(pFile, offset, pBuf, amt);
-  if( doTiming ){
-    g_diskAnnVfsReadMs += diskAnnVfsNowMs() - vfsReadStartMs;
-    g_diskAnnVfsReadCalls++;
-    if( got > 0 ) g_diskAnnVfsReadBytes += got;
-  }
   if( got==amt ){
     return SQLITE_OK;
   }else if( got<0 ){
