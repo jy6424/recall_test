@@ -82,17 +82,30 @@ static int g_queryCount;
 static double g_queryTotalMs;
 static double g_queryGraphMs;
 static double g_queryResultMs;
+static double g_queryStartNodeMs;
+static double g_queryCtxInitMs;
+static double g_queryCtxDeinitMs;
 static double g_queryBlobReadMs;
 static int g_queryBlobReads;
 static int g_queryNodesVisited;
 static long long g_queryEdgesExamined;
 static double g_queryDistanceMs;
+static double g_vtabOpenMs;
+static double g_vtabCloseMs;
+static double g_vtabFilterMs;
+static double g_vtabNextMs;
+static double g_vtabColumnMs;
+static double g_vtabRowidMs;
 static double g_buildDistanceMs;
 static double g_totalBuildReadMs;
 static double g_totalBuildWriteMs;
 static double g_totalBuildDistMs;
 static int g_distTimingMode = 0; /* 0=off, 1=query, 2=build */
 static int g_ioTimingEnabled = -1;
+
+static double diskAnnMsBetween(struct timespec *p0, struct timespec *p1){
+  return (p1->tv_sec - p0->tv_sec)*1000.0 + (p1->tv_nsec - p0->tv_nsec)/1e6;
+}
 
 static int diskAnnIoTimingEnabled(void){
   if( g_ioTimingEnabled < 0 ){
@@ -1519,7 +1532,7 @@ int diskAnnSearch(
   u64 nStartRowid;
   int nOutRows;
   int i;
-  struct timespec _q0, _q1, _qg0, _qg1, _qr0, _qr1;
+  struct timespec _q0, _q1, _qs0, _qs1, _qi0, _qi1, _qg0, _qg1, _qr0, _qr1, _qd0, _qd1;
   double blobReadBefore, blobReadAfter;
   int blobReadCountBefore, blobReadCountAfter;
   int visitedBefore, visitedAfter;
@@ -1548,7 +1561,9 @@ int diskAnnSearch(
   visitedBefore = g_searchVisitedTotal;
   edgesBefore = g_searchEdgesTotal;
 
+  clock_gettime(CLOCK_MONOTONIC, &_qs0);
   rc = diskAnnSelectRandomShadowRow(pIndex, &nStartRowid);
+  clock_gettime(CLOCK_MONOTONIC, &_qs1);
   if( rc == SQLITE_DONE ){
     pRows->nRows = 0;
     pRows->nCols = pKey->nKeyColumns;
@@ -1557,7 +1572,9 @@ int diskAnnSearch(
     *pzErrMsg = sqlite3_mprintf("vector index(search): failed to select start node for search");
     return rc;
   }
+  clock_gettime(CLOCK_MONOTONIC, &_qi0);
   rc = diskAnnSearchCtxInit(pIndex, &ctx, pVector, pIndex->searchL, k, DISKANN_BLOB_READONLY);
+  clock_gettime(CLOCK_MONOTONIC, &_qi1);
   if( rc != SQLITE_OK ){
     *pzErrMsg = sqlite3_mprintf("vector index(search): failed to initialize search context");
     goto out;
@@ -1600,24 +1617,25 @@ int diskAnnSearch(
   visitedAfter = g_searchVisitedTotal;
   edgesAfter = g_searchEdgesTotal;
 
-  g_queryCount++;
-  {
-    double totalMs = (_qr1.tv_sec - _q0.tv_sec)*1000.0 + (_qr1.tv_nsec - _q0.tv_nsec)/1e6;
-    double graphMs = (_qg1.tv_sec - _qg0.tv_sec)*1000.0 + (_qg1.tv_nsec - _qg0.tv_nsec)/1e6;
-    double resultMs = (_qr1.tv_sec - _qr0.tv_sec)*1000.0 + (_qr1.tv_nsec - _qr0.tv_nsec)/1e6;
-    g_queryTotalMs += totalMs;
-    g_queryGraphMs += graphMs;
-    g_queryResultMs += resultMs;
+  rc = SQLITE_OK;
+out:
+  clock_gettime(CLOCK_MONOTONIC, &_qd0);
+  diskAnnSearchCtxDeinit(&ctx);
+  clock_gettime(CLOCK_MONOTONIC, &_qd1);
+  if( rc == SQLITE_OK ){
+    clock_gettime(CLOCK_MONOTONIC, &_q1);
+    g_queryCount++;
+    g_queryTotalMs += diskAnnMsBetween(&_q0, &_q1);
+    g_queryStartNodeMs += diskAnnMsBetween(&_qs0, &_qs1);
+    g_queryCtxInitMs += diskAnnMsBetween(&_qi0, &_qi1);
+    g_queryGraphMs += diskAnnMsBetween(&_qg0, &_qg1);
+    g_queryResultMs += diskAnnMsBetween(&_qr0, &_qr1);
+    g_queryCtxDeinitMs += diskAnnMsBetween(&_qd0, &_qd1);
     g_queryBlobReadMs += (blobReadAfter - blobReadBefore);
     g_queryBlobReads += (blobReadCountAfter - blobReadCountBefore);
     g_queryNodesVisited += (visitedAfter - visitedBefore);
     g_queryEdgesExamined += (edgesAfter - edgesBefore);
   }
-
-  rc = SQLITE_OK;
-out:
-  clock_gettime(CLOCK_MONOTONIC, &_q1);
-  diskAnnSearchCtxDeinit(&ctx);
   return rc;
 }
 
@@ -1956,14 +1974,23 @@ int diskAnnOpenIndex(
 static void diskAnnPrintSearchStats(void){
   if( g_queryCount > 0 ){
     double avgTotal = g_queryTotalMs / g_queryCount;
+    double avgStart = g_queryStartNodeMs / g_queryCount;
+    double avgCtxInit = g_queryCtxInitMs / g_queryCount;
     double avgGraph = g_queryGraphMs / g_queryCount;
     double avgResult = g_queryResultMs / g_queryCount;
+    double avgCtxDeinit = g_queryCtxDeinitMs / g_queryCount;
     double avgBlobRead = g_queryBlobReadMs / g_queryCount;
     double avgDist = g_queryDistanceMs / g_queryCount;
+    double diskAnnOther = g_queryTotalMs - g_queryStartNodeMs - g_queryCtxInitMs
+                        - g_queryGraphMs - g_queryResultMs - g_queryCtxDeinitMs;
     double qps = g_queryTotalMs > 0 ? g_queryCount / (g_queryTotalMs / 1000.0) : 0;
     fprintf(stderr, "\n=== diskAnn search breakdown (%d queries) ===\n", g_queryCount);
     fprintf(stderr, "  total:          %8.1f ms  (avg %.3f ms/q, %.0f q/s)\n",
             g_queryTotalMs, avgTotal, qps);
+    fprintf(stderr, "  start node select:%7.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
+            g_queryStartNodeMs, avgStart, g_queryStartNodeMs/g_queryTotalMs*100);
+    fprintf(stderr, "  context init:   %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
+            g_queryCtxInitMs, avgCtxInit, g_queryCtxInitMs/g_queryTotalMs*100);
     fprintf(stderr, "  graph traversal:%8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             g_queryGraphMs, avgGraph, g_queryGraphMs/g_queryTotalMs*100);
     fprintf(stderr, "    query blob read path:%7.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
@@ -1974,9 +2001,26 @@ static void diskAnnPrintSearchStats(void){
             g_queryGraphMs > 0 ? g_queryDistanceMs/g_queryGraphMs*100 : 0);
     fprintf(stderr, "  result collect: %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             g_queryResultMs, avgResult, g_queryResultMs/g_queryTotalMs*100);
+    fprintf(stderr, "  context deinit: %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
+            g_queryCtxDeinitMs, avgCtxDeinit, g_queryCtxDeinitMs/g_queryTotalMs*100);
+    fprintf(stderr, "  diskAnn other:  %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
+            diskAnnOther, diskAnnOther/g_queryCount, diskAnnOther/g_queryTotalMs*100);
+    fprintf(stderr, "  vtab open:      %8.1f ms\n", g_vtabOpenMs);
+    fprintf(stderr, "  vtab filter:    %8.1f ms\n", g_vtabFilterMs);
+    fprintf(stderr, "  vtab next:      %8.1f ms\n", g_vtabNextMs);
+    fprintf(stderr, "  vtab column:    %8.1f ms\n", g_vtabColumnMs);
+    fprintf(stderr, "  vtab rowid:     %8.1f ms\n", g_vtabRowidMs);
+    fprintf(stderr, "  vtab close:     %8.1f ms\n", g_vtabCloseMs);
     fprintf(stderr, "================================================\n");
   }
 }
+
+void diskAnnRecordVtabOpen(double ms){ g_vtabOpenMs += ms; }
+void diskAnnRecordVtabClose(double ms){ g_vtabCloseMs += ms; }
+void diskAnnRecordVtabFilter(double ms){ g_vtabFilterMs += ms; }
+void diskAnnRecordVtabNext(double ms){ g_vtabNextMs += ms; }
+void diskAnnRecordVtabColumn(double ms){ g_vtabColumnMs += ms; }
+void diskAnnRecordVtabRowid(double ms){ g_vtabRowidMs += ms; }
 
 void diskAnnRecordInsertStmt(double ms){
   g_totalInsertStmtMs += ms;

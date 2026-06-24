@@ -548,12 +548,23 @@ def parse_diskann_stats(stderr_text):
     grab(r'build distance:\s*([\d.]+)\s+ms', 'build_dist_ms')
     grab(r'LSM (?:autowork|work) during build:\s*([\d.]+)\s+ms', 'build_lsm_ms')
     # Query stats
+    grab(r'total:\s*([\d.]+)\s+ms', 'search_total_ms')
+    grab(r'start node select:\s*([\d.]+)\s+ms', 'start_node_ms')
+    grab(r'context init:\s*([\d.]+)\s+ms', 'ctx_init_ms')
     grab(r'graph traversal:\s*([\d.]+)\s+ms', 'graph_ms')
     grab(r'query KV read path:\s*([\d.]+)\s+ms', 'query_read_ms')
     grab(r'query blob read path:\s*([\d.]+)\s+ms', 'query_read_ms')
     grab(r'query read I/O:\s*([\d.]+)\s+ms', 'query_read_ms')
     grab(r'query distance:\s*([\d.]+)\s+ms', 'query_dist_ms')
     grab(r'result collect:\s*([\d.]+)\s+ms', 'result_ms')
+    grab(r'context deinit:\s*([\d.]+)\s+ms', 'ctx_deinit_ms')
+    grab(r'diskAnn other:\s*([\d.]+)\s+ms', 'diskann_other_ms')
+    grab(r'vtab open:\s*([\d.]+)\s+ms', 'vtab_open_ms')
+    grab(r'vtab filter:\s*([\d.]+)\s+ms', 'vtab_filter_ms')
+    grab(r'vtab next:\s*([\d.]+)\s+ms', 'vtab_next_ms')
+    grab(r'vtab column:\s*([\d.]+)\s+ms', 'vtab_column_ms')
+    grab(r'vtab rowid:\s*([\d.]+)\s+ms', 'vtab_rowid_ms')
+    grab(r'vtab close:\s*([\d.]+)\s+ms', 'vtab_close_ms')
     grab(r'([\d.]+)\s+q/s', 'qps')
     return stats
 
@@ -669,7 +680,6 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         )
     if ins_stats.get('build_total_ms') is not None:
         stmt_s = ins_stats.get('insert_stmt_total_ms', 0) / 1000
-        vdbe_work_s = ins_stats.get('insert_vdbe_work_ms', 0) / 1000
         finish_s = ins_stats.get('insert_stmt_finish_ms', 0) / 1000
         wal_s = ins_stats.get('step_wal_ms', 0) / 1000
         build_s = ins_stats.get('build_total_ms', 0) / 1000
@@ -682,8 +692,8 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         dist_s = ins_stats.get('build_dist_ms', 0) / 1000
         lsm_s = ins_stats.get('build_lsm_ms', 0) / 1000
         print(
-            f"        Stmt={stmt_s:.1f}s  VDBEWork={vdbe_work_s:.1f}s  "
-            f"StmtFinish={finish_s:.1f}s  Wal={wal_s:.1f}s  VecBuild={build_s:.1f}s  "
+            f"        Stmt={stmt_s:.1f}s  Commit={finish_s:.1f}s  "
+            f"Checkpt={wal_s:.1f}s  VecBuild={build_s:.1f}s  "
             f"Shadow={shadow_s:.1f}s  GraphBuild={graph_s:.1f}s  "
             f"BuildTrav={traversal_s:.1f}s  EdgeUpd={edge_update_s:.1f}s  "
             f"ReadPath={read_s:.1f}s  WritePath={write_s:.1f}s  Dist={dist_s:.1f}s  "
@@ -781,10 +791,21 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         )
     if q_stats.get('graph_ms'):
         print(
-            f"        Graph={q_stats.get('graph_ms', 0):.0f}ms  "
+            f"        SearchTotal={q_stats.get('search_total_ms', 0):.0f}ms  "
+            f"Start={q_stats.get('start_node_ms', 0):.0f}ms  "
+            f"CtxInit={q_stats.get('ctx_init_ms', 0):.0f}ms  "
+            f"Graph={q_stats.get('graph_ms', 0):.0f}ms  "
             f"ReadPath={q_stats.get('query_read_ms', 0):.0f}ms  "
             f"QueryDist={q_stats.get('query_dist_ms', 0):.0f}ms  "
-            f"Result={q_stats.get('result_ms', 0):.0f}ms"
+            f"Result={q_stats.get('result_ms', 0):.0f}ms  "
+            f"CtxDeinit={q_stats.get('ctx_deinit_ms', 0):.0f}ms"
+        )
+        print(
+            f"        DiskAnnOther={q_stats.get('diskann_other_ms', 0):.0f}ms  "
+            f"VTabFilter={q_stats.get('vtab_filter_ms', 0):.0f}ms  "
+            f"VTabNext={q_stats.get('vtab_next_ms', 0):.0f}ms  "
+            f"VTabColumn={q_stats.get('vtab_column_ms', 0):.0f}ms  "
+            f"VTabRowid={q_stats.get('vtab_rowid_ms', 0):.0f}ms"
         )
     print(f"        {format_io_summary(result['query_disk_io'])}")
     for block in extract_c_stat_blocks(q_err):
@@ -947,15 +968,15 @@ def main():
     show_compact = use_compaction
     for ds_name, ds_results in all_results.items():
         ins_hdr = (
-            f"{'Overall':>8} {'Stmt':>8} {'VDBEWork':>8} {'StmtFin':>8} "
-            f"{'Wal':>8} "
-            f"{'VecBuild':>8} {'ReadPath':>8} "
+            f"{'Overall':>8} {'Stmt':>8} {'Commit':>8} {'Checkpt':>8} "
+            f"{'VecBuild':>8} {'Shadow':>8} {'Trav':>8} {'EdgeUpd':>8} "
+            f"{'ReadPath':>8} "
             f"{'WritePath':>9} {'Dist':>8} {'LSM':>8}"
         )
         ins_sub = (
             f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} "
-            f"{'(s)':>8} "
-            f"{'(s)':>8} {'(s)':>8} {'(s)':>9} {'(s)':>8} {'(s)':>8}"
+            f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} "
+            f"{'(s)':>8} {'(s)':>9} {'(s)':>8} {'(s)':>8}"
         )
         if show_compact:
             ins_hdr += f" {'Compact':>8}"
@@ -982,19 +1003,21 @@ def main():
             short_label = r['label'].replace(f"{ds_name}_", "")
             ist = r.get('ins_stats', {})
             stmt_s = ist.get('insert_stmt_total_ms', 0) / 1000
-            vdbe_work_s = ist.get('insert_vdbe_work_ms', 0) / 1000
             finish_s = ist.get('insert_stmt_finish_ms', 0) / 1000
             wal_s = ist.get('step_wal_ms', 0) / 1000
             build_s = ist.get('build_total_ms', 0) / 1000
+            shadow_s = ist.get('shadow_insert_ms', 0) / 1000
+            traversal_s = ist.get('build_traversal_ms', 0) / 1000
+            edge_update_s = ist.get('build_edge_update_ms', 0) / 1000
             read_s = ist.get('build_read_ms', 0) / 1000
             write_s = ist.get('build_write_ms', 0) / 1000
             dist_s = ist.get('build_dist_ms', 0) / 1000
             lsm_s = ist.get('build_lsm_ms', 0) / 1000
             qst = r.get('q_stats', {})
             ins_vals = (f"{r['insert_time_s']:>8.1f} "
-                        f"{stmt_s:>8.1f} {vdbe_work_s:>8.1f} {finish_s:>8.1f} "
-                        f"{wal_s:>8.1f} "
+                        f"{stmt_s:>8.1f} {finish_s:>8.1f} {wal_s:>8.1f} "
                         f"{build_s:>8.1f} "
+                        f"{shadow_s:>8.1f} {traversal_s:>8.1f} {edge_update_s:>8.1f} "
                         f"{read_s:>8.1f} "
                         f"{write_s:>9.1f} {dist_s:>8.1f} {lsm_s:>8.1f}")
             if show_compact:
