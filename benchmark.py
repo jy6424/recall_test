@@ -555,6 +555,18 @@ def parse_diskann_stats(stderr_text):
     grab(r'query KV read path:\s*([\d.]+)\s+ms', 'query_read_ms')
     grab(r'query blob read path:\s*([\d.]+)\s+ms', 'query_read_ms')
     grab(r'query read I/O:\s*([\d.]+)\s+ms', 'query_read_ms')
+    grab(r'blob open:\s*([\d.]+)\s+ms', 'blob_open_ms')
+    grab(r'blob reopen:\s*([\d.]+)\s+ms', 'blob_reopen_ms')
+    grab(r'blob read:\s*([\d.]+)\s+ms', 'blob_read_call_ms')
+    m_cache = re.search(r'blob read:\s*[\d.]+\s+ms\s+\(cache hit/miss\s+(\d+)/(\d+)\)', stderr_text)
+    if m_cache:
+        stats['blob_cache_hits'] = int(m_cache.group(1))
+        stats['blob_cache_misses'] = int(m_cache.group(2))
+    grab(r'KV cursor open:\s*([\d.]+)\s+ms', 'kv_cursor_open_ms')
+    grab(r'KV seek:\s*([\d.]+)\s+ms', 'kv_seek_ms')
+    grab(r'KV data:\s*([\d.]+)\s+ms', 'kv_data_ms')
+    grab(r'KV decode:\s*([\d.]+)\s+ms', 'kv_decode_ms')
+    grab(r'KV memcpy:\s*([\d.]+)\s+ms', 'kv_memcpy_ms')
     grab(r'query distance:\s*([\d.]+)\s+ms', 'query_dist_ms')
     grab(r'result collect:\s*([\d.]+)\s+ms', 'result_ms')
     grab(r'context deinit:\s*([\d.]+)\s+ms', 'ctx_deinit_ms')
@@ -565,6 +577,13 @@ def parse_diskann_stats(stderr_text):
     grab(r'vtab column:\s*([\d.]+)\s+ms', 'vtab_column_ms')
     grab(r'vtab rowid:\s*([\d.]+)\s+ms', 'vtab_rowid_ms')
     grab(r'vtab close:\s*([\d.]+)\s+ms', 'vtab_close_ms')
+    grab(r'vector search total:\s*([\d.]+)\s+ms', 'vector_search_total_ms')
+    grab(r'vector parse:\s*([\d.]+)\s+ms', 'vector_parse_ms')
+    grab(r'index lookup/open:\s*([\d.]+)\s+ms', 'index_lookup_ms')
+    grab(r'diskAnn call:\s*([\d.]+)\s+ms', 'diskann_call_ms')
+    grab(r'vector cleanup:\s*([\d.]+)\s+ms', 'vector_cleanup_ms')
+    grab(r'vfs read syscall:\s*([\d.]+)\s+ms', 'file_read_ms')
+    grab(r'lsm file read syscall:\s*([\d.]+)\s+ms', 'file_read_ms')
     grab(r'([\d.]+)\s+q/s', 'qps')
     return stats
 
@@ -578,7 +597,11 @@ def extract_c_stat_blocks(stderr_text):
 
     for line in lines:
         stripped = line.rstrip()
-        if stripped.startswith("=== diskAnn ") and stripped.endswith("==="):
+        if (
+            stripped.startswith("=== diskAnn ")
+            or stripped == "=== VFS read timing ==="
+            or stripped == "=== LSM file read timing ==="
+        ) and stripped.endswith("==="):
             if cur:
                 blocks.append("\n".join(cur))
                 cur = []
@@ -807,6 +830,26 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
             f"VTabColumn={q_stats.get('vtab_column_ms', 0):.0f}ms  "
             f"VTabRowid={q_stats.get('vtab_rowid_ms', 0):.0f}ms"
         )
+        if q_stats.get('blob_read_call_ms') or q_stats.get('kv_seek_ms'):
+            print(
+                f"        BlobOpen={q_stats.get('blob_open_ms', 0):.0f}ms  "
+                f"BlobReopen={q_stats.get('blob_reopen_ms', 0):.0f}ms  "
+                f"BlobRead={q_stats.get('blob_read_call_ms', 0):.0f}ms  "
+                f"KVSeek={q_stats.get('kv_seek_ms', 0):.0f}ms  "
+                f"KVData={q_stats.get('kv_data_ms', 0):.0f}ms  "
+                f"KVDecode={q_stats.get('kv_decode_ms', 0):.0f}ms  "
+                f"KVMemcpy={q_stats.get('kv_memcpy_ms', 0):.0f}ms"
+            )
+        if q_stats.get('vector_search_total_ms'):
+            print(
+                f"        VecSearch={q_stats.get('vector_search_total_ms', 0):.0f}ms  "
+                f"VecParse={q_stats.get('vector_parse_ms', 0):.0f}ms  "
+                f"IdxLookup={q_stats.get('index_lookup_ms', 0):.0f}ms  "
+                f"DiskAnnCall={q_stats.get('diskann_call_ms', 0):.0f}ms  "
+                f"VecCleanup={q_stats.get('vector_cleanup_ms', 0):.0f}ms"
+            )
+        if q_stats.get('file_read_ms'):
+            print(f"        FileRead={q_stats.get('file_read_ms', 0):.0f}ms")
     print(f"        {format_io_summary(result['query_disk_io'])}")
     for block in extract_c_stat_blocks(q_err):
         print(block)

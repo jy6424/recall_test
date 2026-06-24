@@ -911,6 +911,10 @@ int vectorIndexSearch(
   VectorIdxKey pKey;
   VectorIdxParams idxParams;
   sqlite4_env *pEnv = db->pEnv;
+  double totalStartMs = diskAnnVectorIndexNowMs();
+  double parseStartMs = 0.0, lookupStartMs = 0.0, diskAnnStartMs = 0.0;
+  double closeStartMs = 0.0;
+  double parseMs = 0.0, lookupMs = 0.0, diskAnnMs = 0.0, closeMs = 0.0;
   vectorIdxParamsInit(&idxParams, NULL, 0);
 
   if( argc != 3 ){
@@ -918,6 +922,7 @@ int vectorIndexSearch(
     rc = SQLITE4_ERROR;
     goto out;
   }
+  parseStartMs = diskAnnVectorIndexNowMs();
   if( detectVectorParameters(argv[1], VECTOR_TYPE_FLOAT32, &type, &dims, pzErrMsg) != 0 ){
     rc = SQLITE4_ERROR;
     goto out;
@@ -957,7 +962,9 @@ int vectorIndexSearch(
     rc = SQLITE4_ERROR;
     goto out;
   }
+  parseMs += diskAnnVectorIndexNowMs() - parseStartMs;
 
+  lookupStartMs = diskAnnVectorIndexNowMs();
   if( sqlite4_value_type(argv[0]) != SQLITE4_TEXT ){
     *pzErrMsg = sqlite4_mprintf(pEnv, "vector index(search): first parameter (index) must be a string");
     rc = SQLITE4_ERROR;
@@ -986,8 +993,12 @@ int vectorIndexSearch(
     rc = SQLITE4_ERROR;
     goto out;
   }
+  lookupMs += diskAnnVectorIndexNowMs() - lookupStartMs;
+  diskAnnStartMs = diskAnnVectorIndexNowMs();
   rc = diskAnnSearch(pDiskAnn, pVector, k, &pKey, pRows, pzErrMsg);
+  diskAnnMs += diskAnnVectorIndexNowMs() - diskAnnStartMs;
 out:
+  closeStartMs = diskAnnVectorIndexNowMs();
   if( pDiskAnn != NULL ){
     *nReads += pDiskAnn->nReads;
     *nWrites += pDiskAnn->nWrites;
@@ -996,6 +1007,11 @@ out:
   if( pVector != NULL ){
     vectorFree(pVector);
   }
+  closeMs += diskAnnVectorIndexNowMs() - closeStartMs;
+  diskAnnRecordVectorSearch(
+      diskAnnVectorIndexNowMs() - totalStartMs, parseMs, lookupMs,
+      diskAnnMs, closeMs
+  );
   return rc;
 }
 

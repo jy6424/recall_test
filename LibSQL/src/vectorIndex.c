@@ -1001,6 +1001,10 @@ int vectorIndexSearch(
   Index *pIndex;
   VectorIdxKey pKey;
   VectorIdxParams idxParams;
+  double totalStartMs = diskAnnVectorIndexNowMs();
+  double parseStartMs = 0.0, lookupStartMs = 0.0, diskAnnStartMs = 0.0;
+  double closeStartMs = 0.0;
+  double parseMs = 0.0, lookupMs = 0.0, diskAnnMs = 0.0, closeMs = 0.0;
   vectorIdxParamsInit(&idxParams, NULL, 0);
 
   if( argc != 3 ){
@@ -1008,6 +1012,7 @@ int vectorIndexSearch(
     rc = SQLITE_ERROR;
     goto out;
   }
+  parseStartMs = diskAnnVectorIndexNowMs();
   if( detectVectorParameters(argv[1], VECTOR_TYPE_FLOAT32, &type, &dims, pzErrMsg) != 0 ){
     rc = SQLITE_ERROR;
     goto out;
@@ -1047,7 +1052,9 @@ int vectorIndexSearch(
     rc = SQLITE_ERROR;
     goto out;
   }
+  parseMs += diskAnnVectorIndexNowMs() - parseStartMs;
 
+  lookupStartMs = diskAnnVectorIndexNowMs();
   if( sqlite3_value_type(argv[0]) != SQLITE_TEXT ){
     *pzErrMsg = sqlite3_mprintf("vector index(search): first parameter (index) must be a string");
     rc = SQLITE_ERROR;
@@ -1101,8 +1108,12 @@ int vectorIndexSearch(
     rc = SQLITE_ERROR;
     goto out;
   }
+  lookupMs += diskAnnVectorIndexNowMs() - lookupStartMs;
+  diskAnnStartMs = diskAnnVectorIndexNowMs();
   rc = diskAnnSearch(pDiskAnn, pVector, k, &pKey, pRows, pzErrMsg);
+  diskAnnMs += diskAnnVectorIndexNowMs() - diskAnnStartMs;
 out:
+  closeStartMs = diskAnnVectorIndexNowMs();
   if( pDiskAnn != NULL ){
     *nReads += pDiskAnn->nReads;
     *nWrites += pDiskAnn->nWrites;
@@ -1116,6 +1127,11 @@ out:
   if( iDb >= 0 && iDb != 1 ){
     sqlite3BtreeLeave(db->aDb[iDb].pBt);
   }
+  closeMs += diskAnnVectorIndexNowMs() - closeStartMs;
+  diskAnnRecordVectorSearch(
+      diskAnnVectorIndexNowMs() - totalStartMs, parseMs, lookupMs,
+      diskAnnMs, closeMs
+  );
   return rc;
 }
 

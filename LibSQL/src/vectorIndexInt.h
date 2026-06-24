@@ -65,6 +65,8 @@ void diskAnnRecordInsertStmt(double ms);
 void diskAnnRecordInsertOther(double ms);
 void diskAnnRecordInsertFinish(double ms);
 void diskAnnRecordIndexBuildTotal(double ms);
+void diskAnnRecordVectorSearch(double totalMs, double parseMs, double lookupMs,
+                               double diskAnnMs, double closeMs);
 
 /*
  * Accessor for node binary format
