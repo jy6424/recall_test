@@ -571,7 +571,6 @@ def parse_diskann_stats(stderr_text):
     grab(r'query distance:\s*([\d.]+)\s+ms', 'query_dist_ms')
     grab(r'result collect:\s*([\d.]+)\s+ms', 'result_ms')
     grab(r'context deinit:\s*([\d.]+)\s+ms', 'ctx_deinit_ms')
-    grab(r'diskAnn other:\s*([\d.]+)\s+ms', 'diskann_other_ms')
     grab(r'vector search total:\s*([\d.]+)\s+ms', 'vector_search_total_ms')
     grab(r'vector parse:\s*([\d.]+)\s+ms', 'vector_parse_ms')
     grab(r'index lookup/open:\s*([\d.]+)\s+ms', 'index_lookup_ms')
@@ -827,7 +826,6 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
             f"Result={q_stats.get('result_ms', 0):.0f}ms  "
             f"CtxDeinit={q_stats.get('ctx_deinit_ms', 0):.0f}ms"
         )
-        print(f"        DiskAnnOther={q_stats.get('diskann_other_ms', 0):.0f}ms")
         if q_stats.get('blob_read_call_ms') or q_stats.get('kv_seek_ms'):
             print(
                 f"        BlobOpen={q_stats.get('blob_open_ms', 0):.0f}ms  "
@@ -973,7 +971,6 @@ def main():
 
     # Run all dataset x config combinations
     all_results = {}
-    cleanup_targets = []
     for ds_name, insert_sql, query_sql, gt_file in datasets:
         print(f"\n{'#'*70}")
         print(f"  DATASET: {ds_name}")
@@ -1011,11 +1008,11 @@ def main():
             db_path = os.path.join(args.db_dir, f"bench_{run_label}.db")
             if insert_sql_prepared and os.path.exists(insert_sql_prepared):
                 os.remove(insert_sql_prepared)
-            cleanup_targets.append((db_path, is_s3))
             if args.keep_db:
                 print(f"  Kept DB {db_path}")
             else:
-                print(f"  Will clean up {db_path} after all runs")
+                cleanup_db(db_path, is_sqlite3=is_s3)
+                print(f"  Cleaned up {db_path}")
 
         all_results[ds_name] = ds_results
 
@@ -1096,17 +1093,6 @@ def main():
             )
             print(f"{short_label:>16} |{ins_vals} |{q_vals} | {r['compact_size_mb']:>8.1f}")
         print(f"{'='*w}")
-
-    if not args.keep_db:
-        print("\nCleaning up benchmark DB files...")
-        seen = set()
-        for db_path, is_s3 in cleanup_targets:
-            key = (db_path, is_s3)
-            if key in seen:
-                continue
-            seen.add(key)
-            cleanup_db(db_path, is_sqlite3=is_s3)
-            print(f"  Cleaned up {db_path}")
 
 
 if __name__ == "__main__":

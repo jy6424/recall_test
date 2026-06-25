@@ -2033,8 +2033,6 @@ static void diskAnnPrintSearchStats(void){
     double avgCtxDeinit = g_queryCtxDeinitMs / g_queryCount;
     double avgBlobRead = g_queryBlobReadMs / g_queryCount;
     double avgDist = g_queryDistanceMs / g_queryCount;
-    double diskAnnOther = g_queryTotalMs - g_queryCtxInitMs
-                        - g_queryGraphMs - g_queryResultMs - g_queryCtxDeinitMs;
     double qps = g_queryTotalMs > 0 ? g_queryCount / (g_queryTotalMs / 1000.0) : 0;
     fprintf(stderr, "\n=== diskAnn search breakdown (%d queries) ===\n", g_queryCount);
     fprintf(stderr, "  total:          %8.1f ms  (avg %.3f ms/q, %.0f q/s)\n",
@@ -2057,8 +2055,6 @@ static void diskAnnPrintSearchStats(void){
             g_queryResultMs, avgResult, g_queryResultMs/g_queryTotalMs*100);
     fprintf(stderr, "  context deinit: %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             g_queryCtxDeinitMs, avgCtxDeinit, g_queryCtxDeinitMs/g_queryTotalMs*100);
-    fprintf(stderr, "  diskAnn other:  %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
-            diskAnnOther, diskAnnOther/g_queryCount, diskAnnOther/g_queryTotalMs*100);
     fprintf(stderr, "  vector search total:%5.1f ms\n", g_vectorSearchTotalMs);
     fprintf(stderr, "    vector parse: %8.1f ms\n", g_vectorSearchParseMs);
     fprintf(stderr, "    index lookup/open:%5.1f ms\n", g_vectorSearchLookupMs);
