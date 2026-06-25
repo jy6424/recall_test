@@ -902,8 +902,8 @@ def main():
                         help="Directory to store disk I/O CSV logs")
     parser.add_argument("--query-only", action="store_true",
                         help="Run query and recall only using existing bench_*.db files")
-    parser.add_argument("--cleanup-after", action="store_true",
-                        help="Remove generated bench_*.db files after all runs and summaries complete")
+    parser.add_argument("--keep-db", action="store_true",
+                        help="Keep generated bench_*.db files after all runs")
     args = parser.parse_args()
 
     page_sizes_kb = [int(x) for x in args.page_sizes.split(",")]
@@ -1008,15 +1008,14 @@ def main():
             )
             ds_results.append(result)
 
-            # Keep the generated DB so it can be inspected after the benchmark.
             db_path = os.path.join(args.db_dir, f"bench_{run_label}.db")
             if insert_sql_prepared and os.path.exists(insert_sql_prepared):
                 os.remove(insert_sql_prepared)
             cleanup_targets.append((db_path, is_s3))
-            if args.cleanup_after:
-                print(f"  Will clean up {db_path} after all runs")
-            else:
+            if args.keep_db:
                 print(f"  Kept DB {db_path}")
+            else:
+                print(f"  Will clean up {db_path} after all runs")
 
         all_results[ds_name] = ds_results
 
@@ -1098,7 +1097,7 @@ def main():
             print(f"{short_label:>16} |{ins_vals} |{q_vals} | {r['compact_size_mb']:>8.1f}")
         print(f"{'='*w}")
 
-    if args.cleanup_after:
+    if not args.keep_db:
         print("\nCleaning up benchmark DB files...")
         seen = set()
         for db_path, is_s3 in cleanup_targets:
