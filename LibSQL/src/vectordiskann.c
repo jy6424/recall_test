@@ -731,73 +731,19 @@ int diskAnnDropIndex(sqlite3 *db, const char *zDbSName, const char *zIdxName){
   return rc;
 }
 
-static int diskAnnLoadShadowMaxRowid(DiskAnnIndex *pIndex){
-  int rc;
-  sqlite3_stmt *pStmt = NULL;
-  char *zSql = NULL;
-
-  zSql = sqlite3MPrintf(
-    pIndex->db,
-    "SELECT MAX(rowid) FROM \"%w\".%s",
-    pIndex->zDbSName, pIndex->zShadow
-  );
-  if( zSql == NULL ){
-    rc = SQLITE_NOMEM_BKPT;
-    goto out;
-  }
-  rc = sqlite3_prepare_v2(pIndex->db, zSql, -1, &pStmt, 0);
-  if( rc != SQLITE_OK ){
-    goto out;
-  }
-  rc = sqlite3_step(pStmt);
-  if( rc != SQLITE_ROW ){
-    goto out;
-  }
-  if( sqlite3_column_type(pStmt, 0) == SQLITE_NULL ){
-    pIndex->nShadowMaxRowid = 0;
-    rc = SQLITE_DONE;
-    goto out;
-  }
-  pIndex->nShadowMaxRowid = sqlite3_column_int64(pStmt, 0);
-  rc = SQLITE_OK;
-
-out:
-  if( pStmt != NULL ){
-    sqlite3_finalize(pStmt);
-  }
-  if( zSql != NULL ){
-    sqlite3DbFree(pIndex->db, zSql);
-  }
-  return rc;
-}
-
 /*
  * Select random row from the shadow table and set its rowid to pRowid.
- * Uses the same random-target + nearest-key seek shape as LSMobiVec.
 */
 static int diskAnnSelectRandomShadowRow(DiskAnnIndex *pIndex, u64 *pRowid){
   int rc;
   sqlite3_stmt *pStmt = NULL;
   char *zSql = NULL;
-  u64 randVal;
-  sqlite3_int64 targetRowid;
-
-  if( pIndex->nShadowMaxRowid <= 0 ){
-    rc = diskAnnLoadShadowMaxRowid(pIndex);
-    if( rc == SQLITE_DONE ){
-      return SQLITE_DONE;
-    }
-    if( rc != SQLITE_OK ){
-      return rc;
-    }
-  }
-
-  sqlite3_randomness(sizeof(randVal), &randVal);
-  targetRowid = (sqlite3_int64)(randVal % (u64)pIndex->nShadowMaxRowid) + 1;
 
   zSql = sqlite3MPrintf(
     pIndex->db,
-    "SELECT rowid FROM \"%w\".%s WHERE rowid >= ? ORDER BY rowid LIMIT 1",
+    "SELECT rowid FROM \"%w\".%s LIMIT 1 "
+    "OFFSET ABS(RANDOM()) %% MAX((SELECT COUNT(*) FROM \"%w\".%s), 1)",
+    pIndex->zDbSName, pIndex->zShadow,
     pIndex->zDbSName, pIndex->zShadow
   );
   if( zSql == NULL ){
@@ -808,30 +754,7 @@ static int diskAnnSelectRandomShadowRow(DiskAnnIndex *pIndex, u64 *pRowid){
   if( rc != SQLITE_OK ){
     goto out;
   }
-  rc = sqlite3_bind_int64(pStmt, 1, targetRowid);
-  if( rc != SQLITE_OK ){
-    goto out;
-  }
   rc = sqlite3_step(pStmt);
-  if( rc == SQLITE_DONE ){
-    sqlite3_finalize(pStmt);
-    pStmt = NULL;
-    sqlite3DbFree(pIndex->db, zSql);
-    zSql = sqlite3MPrintf(
-      pIndex->db,
-      "SELECT rowid FROM \"%w\".%s ORDER BY rowid LIMIT 1",
-      pIndex->zDbSName, pIndex->zShadow
-    );
-    if( zSql == NULL ){
-      rc = SQLITE_NOMEM_BKPT;
-      goto out;
-    }
-    rc = sqlite3_prepare_v2(pIndex->db, zSql, -1, &pStmt, 0);
-    if( rc != SQLITE_OK ){
-      goto out;
-    }
-    rc = sqlite3_step(pStmt);
-  }
   if( rc != SQLITE_ROW ){
     goto out;
   }
@@ -1015,9 +938,6 @@ static int diskAnnInsertShadowRow(DiskAnnIndex *pIndex, const VectorInRow *pVect
 
   // check that we has only single row matching the criteria (otherwise - this is a bug)
   assert( sqlite3_step(pStmt) == SQLITE_DONE );
-  if( (i64)*pRowid > pIndex->nShadowMaxRowid ){
-    pIndex->nShadowMaxRowid = (i64)*pRowid;
-  }
   rc = SQLITE_OK;
 out:
   if( pStmt != NULL ){
@@ -1055,9 +975,6 @@ static int diskAnnDeleteShadowRow(DiskAnnIndex *pIndex, i64 nRowid){
   rc = sqlite3_step(pStmt);
   if( rc != SQLITE_DONE ){
     goto out;
-  }
-  if( nRowid >= pIndex->nShadowMaxRowid ){
-    pIndex->nShadowMaxRowid = 0;
   }
   rc = SQLITE_OK;
 out:
@@ -1687,6 +1604,7 @@ int diskAnnSearch(
   visitedBefore = g_searchVisitedTotal;
   edgesBefore = g_searchEdgesTotal;
 
+  clock_gettime(CLOCK_MONOTONIC, &_qg0);
   clock_gettime(CLOCK_MONOTONIC, &_qs0);
   rc = diskAnnSelectRandomShadowRow(pIndex, &nStartRowid);
   clock_gettime(CLOCK_MONOTONIC, &_qs1);
@@ -1706,8 +1624,7 @@ int diskAnnSearch(
     goto out;
   }
 
-  /* Graph traversal (timed) */
-  clock_gettime(CLOCK_MONOTONIC, &_qg0);
+  /* Graph traversal (timed, including start-node selection) */
   g_distTimingMode = 1;
   rc = diskAnnSearchInternal(pIndex, &ctx, nStartRowid, pzErrMsg);
   g_distTimingMode = 0;
@@ -1825,6 +1742,7 @@ int diskAnnInsert(
   }
 
   // note: we must select random row before we will insert new row in the shadow table
+  clock_gettime(CLOCK_MONOTONIC, &_ts0);
   rc = diskAnnSelectRandomShadowRow(pIndex, &nStartRowid);
   if( rc == SQLITE_DONE ){
     first = 1;
@@ -1837,7 +1755,6 @@ int diskAnnInsert(
     buildReadStart = g_totalBlobReadMs;
     buildWriteStart = g_totalBlobWriteMs;
     buildDistStart = g_buildDistanceMs;
-    clock_gettime(CLOCK_MONOTONIC, &_ts0);
     g_distTimingMode = 2;
     rc = diskAnnSearchInternal(pIndex, &ctx, nStartRowid, pzErrMsg);
     g_distTimingMode = 0;
@@ -2072,7 +1989,6 @@ int diskAnnOpenIndex(
   pIndex->pruningAlpha = vectorIdxParamsGetF64(pParams, VECTOR_PRUNING_ALPHA_PARAM_ID);
   pIndex->insertL = vectorIdxParamsGetU64(pParams, VECTOR_INSERT_L_PARAM_ID);
   pIndex->searchL = vectorIdxParamsGetU64(pParams, VECTOR_SEARCH_L_PARAM_ID);
-  pIndex->nShadowMaxRowid = 0;
   pIndex->nReads = 0;
   pIndex->nWrites = 0;
   if( pIndex->nDistanceFunc == 0 ||
@@ -2111,21 +2027,18 @@ int diskAnnOpenIndex(
 static void diskAnnPrintSearchStats(void){
   if( g_queryCount > 0 ){
     double avgTotal = g_queryTotalMs / g_queryCount;
-    double avgStart = g_queryStartNodeMs / g_queryCount;
     double avgCtxInit = g_queryCtxInitMs / g_queryCount;
     double avgGraph = g_queryGraphMs / g_queryCount;
     double avgResult = g_queryResultMs / g_queryCount;
     double avgCtxDeinit = g_queryCtxDeinitMs / g_queryCount;
     double avgBlobRead = g_queryBlobReadMs / g_queryCount;
     double avgDist = g_queryDistanceMs / g_queryCount;
-    double diskAnnOther = g_queryTotalMs - g_queryStartNodeMs - g_queryCtxInitMs
+    double diskAnnOther = g_queryTotalMs - g_queryCtxInitMs
                         - g_queryGraphMs - g_queryResultMs - g_queryCtxDeinitMs;
     double qps = g_queryTotalMs > 0 ? g_queryCount / (g_queryTotalMs / 1000.0) : 0;
     fprintf(stderr, "\n=== diskAnn search breakdown (%d queries) ===\n", g_queryCount);
     fprintf(stderr, "  total:          %8.1f ms  (avg %.3f ms/q, %.0f q/s)\n",
             g_queryTotalMs, avgTotal, qps);
-    fprintf(stderr, "  start node select:%7.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
-            g_queryStartNodeMs, avgStart, g_queryStartNodeMs/g_queryTotalMs*100);
     fprintf(stderr, "  context init:   %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             g_queryCtxInitMs, avgCtxInit, g_queryCtxInitMs/g_queryTotalMs*100);
     fprintf(stderr, "  graph traversal:%8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",

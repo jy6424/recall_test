@@ -30,7 +30,6 @@ struct DiskAnnIndex {
   float pruningAlpha;  /* Alpha parameter for edge pruning during INSERT operation */
   int insertL;         /* Max size of candidate set (L) visited during INSERT operation */
   int searchL;         /* Max size of candidate set (L) visited during SEARCH operation (can be overriden from query in future) */
-  i64 nShadowMaxRowid; /* Cached MAX(rowid) for random start-node selection */
 
   int nReads;
   int nWrites;

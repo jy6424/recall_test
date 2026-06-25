@@ -546,10 +546,11 @@ def parse_diskann_stats(stderr_text):
     grab(r'build blob write path:\s*([\d.]+)\s+ms', 'build_write_ms')
     grab(r'build write I/O:\s*([\d.]+)\s+ms', 'build_write_ms')
     grab(r'build distance:\s*([\d.]+)\s+ms', 'build_dist_ms')
-    grab(r'LSM (?:autowork|work) during build:\s*([\d.]+)\s+ms', 'build_lsm_ms')
+    grab(r'LSM auto-compaction during insert:\s*([\d.]+)\s+ms', 'insert_lsm_compact_ms')
+    grab(r'LSM page compress:\s*([\d.]+)\s+ms', 'lsm_page_compress_ms')
+    grab(r'LSM page decompress:\s*([\d.]+)\s+ms', 'lsm_page_decompress_ms')
     # Query stats
     grab(r'total:\s*([\d.]+)\s+ms', 'search_total_ms')
-    grab(r'start node select:\s*([\d.]+)\s+ms', 'start_node_ms')
     grab(r'context init:\s*([\d.]+)\s+ms', 'ctx_init_ms')
     grab(r'graph traversal:\s*([\d.]+)\s+ms', 'graph_ms')
     grab(r'query KV read path:\s*([\d.]+)\s+ms', 'query_read_ms')
@@ -714,14 +715,17 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
             read_s = ins_stats.get('build_read_ms', 0) / 1000
             write_s = ins_stats.get('build_write_ms', 0) / 1000
             dist_s = ins_stats.get('build_dist_ms', 0) / 1000
-            lsm_s = ins_stats.get('build_lsm_ms', 0) / 1000
+            lsm_compact_s = ins_stats.get('insert_lsm_compact_ms', 0) / 1000
+            pg_comp_s = ins_stats.get('lsm_page_compress_ms', 0) / 1000
+            pg_decomp_s = ins_stats.get('lsm_page_decompress_ms', 0) / 1000
             print(
                 f"        Stmt={stmt_s:.1f}s  Commit={finish_s:.1f}s  "
                 f"Checkpt={wal_s:.1f}s  VecBuild={build_s:.1f}s  "
                 f"Shadow={shadow_s:.1f}s  GraphBuild={graph_s:.1f}s  "
                 f"BuildTrav={traversal_s:.1f}s  EdgeUpd={edge_update_s:.1f}s  "
                 f"ReadPath={read_s:.1f}s  WritePath={write_s:.1f}s  Dist={dist_s:.1f}s  "
-                f"LSMWork={lsm_s:.1f}s"
+                f"LSMComp={lsm_compact_s:.1f}s  PgComp={pg_comp_s:.1f}s  "
+                f"PgDecomp={pg_decomp_s:.1f}s"
             )
             if ins_stats.get('step_api_ms') is not None:
                 print(
@@ -816,7 +820,6 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     if q_stats.get('graph_ms'):
         print(
             f"        SearchTotal={q_stats.get('search_total_ms', 0):.0f}ms  "
-            f"Start={q_stats.get('start_node_ms', 0):.0f}ms  "
             f"CtxInit={q_stats.get('ctx_init_ms', 0):.0f}ms  "
             f"Graph={q_stats.get('graph_ms', 0):.0f}ms  "
             f"ReadPath={q_stats.get('query_read_ms', 0):.0f}ms  "
@@ -842,6 +845,11 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                 f"IdxLookup={q_stats.get('index_lookup_ms', 0):.0f}ms  "
                 f"DiskAnnCall={q_stats.get('diskann_call_ms', 0):.0f}ms  "
                 f"VecCleanup={q_stats.get('vector_cleanup_ms', 0):.0f}ms"
+            )
+        if q_stats.get('lsm_page_compress_ms') or q_stats.get('lsm_page_decompress_ms'):
+            print(
+                f"        PgComp={q_stats.get('lsm_page_compress_ms', 0):.0f}ms  "
+                f"PgDecomp={q_stats.get('lsm_page_decompress_ms', 0):.0f}ms"
             )
     print(f"        {format_io_summary(result['query_disk_io'])}")
     for block in extract_c_stat_blocks(q_err):
@@ -894,6 +902,8 @@ def main():
                         help="Directory to store disk I/O CSV logs")
     parser.add_argument("--query-only", action="store_true",
                         help="Run query and recall only using existing bench_*.db files")
+    parser.add_argument("--cleanup-after", action="store_true",
+                        help="Remove generated bench_*.db files after all runs and summaries complete")
     args = parser.parse_args()
 
     page_sizes_kb = [int(x) for x in args.page_sizes.split(",")]
@@ -963,6 +973,7 @@ def main():
 
     # Run all dataset x config combinations
     all_results = {}
+    cleanup_targets = []
     for ds_name, insert_sql, query_sql, gt_file in datasets:
         print(f"\n{'#'*70}")
         print(f"  DATASET: {ds_name}")
@@ -1001,7 +1012,11 @@ def main():
             db_path = os.path.join(args.db_dir, f"bench_{run_label}.db")
             if insert_sql_prepared and os.path.exists(insert_sql_prepared):
                 os.remove(insert_sql_prepared)
-            print(f"  Kept DB {db_path}")
+            cleanup_targets.append((db_path, is_s3))
+            if args.cleanup_after:
+                print(f"  Will clean up {db_path} after all runs")
+            else:
+                print(f"  Kept DB {db_path}")
 
         all_results[ds_name] = ds_results
 
@@ -1012,21 +1027,24 @@ def main():
             f"{'Overall':>8} {'Stmt':>8} {'Commit':>8} {'Checkpt':>8} "
             f"{'VecBuild':>8} {'Shadow':>8} {'Trav':>8} {'EdgeUpd':>8} "
             f"{'ReadPath':>8} "
-            f"{'WritePath':>9} {'Dist':>8} {'LSM':>8}"
+            f"{'WritePath':>9} {'Dist':>8} {'LSMComp':>8} {'PgComp':>8} {'PgDecomp':>8}"
         )
         ins_sub = (
             f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} "
             f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} "
-            f"{'(s)':>8} {'(s)':>9} {'(s)':>8} {'(s)':>8}"
+            f"{'(s)':>8} {'(s)':>9} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8}"
         )
         if show_compact:
             ins_hdr += f" {'Compact':>8}"
             ins_sub += f" {'(s)':>8}"
         q_hdr = (
             f"{'Overall':>8} {'Graph':>8} {'ReadPath':>8} {'Dist':>8} "
-            f"{'Result':>8} {'Q/s':>8} {'Recall':>8}"
+            f"{'Result':>8} {'PgComp':>8} {'PgDecomp':>8} {'Q/s':>8} {'Recall':>8}"
         )
-        q_sub = f"{'(s)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} {'':>8} {'@k':>8}"
+        q_sub = (
+            f"{'(s)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} "
+            f"{'(ms)':>8} {'(ms)':>8} {'':>8} {'@k':>8}"
+        )
         hdr = f"{'Config':>16} |{ins_hdr} |{q_hdr} | {'Size':>8}"
         sub = f"{'':>16} |{ins_sub} |{q_sub} | {'(MB)':>8}"
         w = len(hdr)
@@ -1053,14 +1071,17 @@ def main():
             read_s = ist.get('build_read_ms', 0) / 1000
             write_s = ist.get('build_write_ms', 0) / 1000
             dist_s = ist.get('build_dist_ms', 0) / 1000
-            lsm_s = ist.get('build_lsm_ms', 0) / 1000
+            lsm_compact_s = ist.get('insert_lsm_compact_ms', 0) / 1000
+            pg_comp_s = ist.get('lsm_page_compress_ms', 0) / 1000
+            pg_decomp_s = ist.get('lsm_page_decompress_ms', 0) / 1000
             qst = r.get('q_stats', {})
             ins_vals = (f"{r['insert_time_s']:>8.1f} "
                         f"{stmt_s:>8.1f} {finish_s:>8.1f} {wal_s:>8.1f} "
                         f"{build_s:>8.1f} "
                         f"{shadow_s:>8.1f} {traversal_s:>8.1f} {edge_update_s:>8.1f} "
                         f"{read_s:>8.1f} "
-                        f"{write_s:>9.1f} {dist_s:>8.1f} {lsm_s:>8.1f}")
+                        f"{write_s:>9.1f} {dist_s:>8.1f} {lsm_compact_s:>8.1f} "
+                        f"{pg_comp_s:>8.1f} {pg_decomp_s:>8.1f}")
             if show_compact:
                 compact_str = f"{r['compact_time_s']:>8.1f}" if r['compact_time_s'] > 0 else f"{'---':>8}"
                 ins_vals += f" {compact_str}"
@@ -1070,10 +1091,23 @@ def main():
                 f"{qst.get('query_read_ms', 0):>8.1f} "
                 f"{qst.get('query_dist_ms', 0):>8.1f} "
                 f"{qst.get('result_ms', 0):>8.1f} "
+                f"{qst.get('lsm_page_compress_ms', 0):>8.1f} "
+                f"{qst.get('lsm_page_decompress_ms', 0):>8.1f} "
                 f"{r['query_per_sec']:>8.0f} {r['recall']:>8.4f}"
             )
             print(f"{short_label:>16} |{ins_vals} |{q_vals} | {r['compact_size_mb']:>8.1f}")
         print(f"{'='*w}")
+
+    if args.cleanup_after:
+        print("\nCleaning up benchmark DB files...")
+        seen = set()
+        for db_path, is_s3 in cleanup_targets:
+            key = (db_path, is_s3)
+            if key in seen:
+                continue
+            seen.add(key)
+            cleanup_db(db_path, is_sqlite3=is_s3)
+            print(f"  Cleaned up {db_path}")
 
 
 if __name__ == "__main__":

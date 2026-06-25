@@ -78,6 +78,16 @@ static double g_vectorSearchCloseMs = 0;
 
 /* Auto-compaction timing globals from lsm_sorted.c */
 extern double g_autoworkTotalMs;
+extern int g_autoworkCalls;
+extern int g_autoworkPages;
+extern double g_lsmCompressMs;
+extern double g_lsmUncompressMs;
+extern int g_lsmCompressCalls;
+extern int g_lsmUncompressCalls;
+extern long long g_lsmCompressInBytes;
+extern long long g_lsmCompressOutBytes;
+extern long long g_lsmUncompressInBytes;
+extern long long g_lsmUncompressOutBytes;
 static int g_ioTimingEnabled = -1;
 
 static double diskAnnMsBetween(struct timespec *p0, struct timespec *p1){
@@ -1630,6 +1640,7 @@ int diskAnnSearch(
   visitedBefore = g_searchVisitedTotal;
   edgesBefore = g_searchEdgesTotal;
 
+  clock_gettime(CLOCK_MONOTONIC, &_qg0);
   clock_gettime(CLOCK_MONOTONIC, &_qs0);
   rc = diskAnnSelectRandomShadowRow(pIndex, &nStartRowid);
   clock_gettime(CLOCK_MONOTONIC, &_qs1);
@@ -1649,8 +1660,7 @@ int diskAnnSearch(
     goto out;
   }
 
-  /* Graph traversal (timed) */
-  clock_gettime(CLOCK_MONOTONIC, &_qg0);
+  /* Graph traversal (timed, including start-node selection) */
   g_distTimingMode = 1;
   rc = diskAnnSearchInternal(pIndex, &ctx, nStartRowid, pzErrMsg);
   g_distTimingMode = 0;
@@ -1732,6 +1742,7 @@ int diskAnnInsert(
   double buildReadStart = 0.0, buildWriteStart = 0.0, buildDistStart = 0.0;
   double insertLsmStart = g_autoworkTotalMs;
   double buildReadMs = 0.0, buildWriteMs = 0.0, buildDistMs = 0.0;
+  struct timespec _trav0, _trav1;
   vInsert.pNode = NULL; vInsert.pEdge = NULL;
   vCandidate.pNode = NULL; vCandidate.pEdge = NULL;
 
@@ -1765,6 +1776,7 @@ int diskAnnInsert(
   }
 
   /* select random row before inserting new row */
+  clock_gettime(CLOCK_MONOTONIC, &_trav0);
   rc = diskAnnSelectRandomShadowRow(pIndex, &nStartRowid);
   if( rc == SQLITE4_DONE ){
     first = 1;
@@ -1774,17 +1786,15 @@ int diskAnnInsert(
     goto out;
   }
   if( !first ){
-    struct timespec _ts0, _ts1;
     buildReadStart = g_totalKvReadMs;
     buildWriteStart = g_totalKvWriteMs;
     buildDistStart = g_buildDistanceMs;
-    clock_gettime(CLOCK_MONOTONIC, &_ts0);
     g_distTimingMode = 2;
     rc = diskAnnSearchInternal(pIndex, &ctx, nStartRowid, pzErrMsg);
     g_distTimingMode = 0;
-    clock_gettime(CLOCK_MONOTONIC, &_ts1);
-    pIndex->totalSearchMs += (_ts1.tv_sec - _ts0.tv_sec)*1000.0
-                           + (_ts1.tv_nsec - _ts0.tv_nsec)/1e6;
+    clock_gettime(CLOCK_MONOTONIC, &_trav1);
+    pIndex->totalSearchMs += (_trav1.tv_sec - _trav0.tv_sec)*1000.0
+                           + (_trav1.tv_nsec - _trav0.tv_nsec)/1e6;
     buildReadMs += g_totalKvReadMs - buildReadStart;
     buildWriteMs += g_totalKvWriteMs - buildWriteStart;
     buildDistMs += g_buildDistanceMs - buildDistStart;
@@ -2170,21 +2180,18 @@ void diskAnnRecordIndexBuildTotal(double ms){
 static void diskAnnPrintSearchStats(void){
   if( g_queryCount > 0 ){
     double avgTotal = g_queryTotalMs / g_queryCount;
-    double avgStart = g_queryStartNodeMs / g_queryCount;
     double avgCtxInit = g_queryCtxInitMs / g_queryCount;
     double avgGraph = g_queryGraphMs / g_queryCount;
     double avgResult = g_queryResultMs / g_queryCount;
     double avgCtxDeinit = g_queryCtxDeinitMs / g_queryCount;
     double avgKvRead = g_queryKvReadMs / g_queryCount;
     double avgDist = g_queryDistanceMs / g_queryCount;
-    double diskAnnOther = g_queryTotalMs - g_queryStartNodeMs - g_queryCtxInitMs
+    double diskAnnOther = g_queryTotalMs - g_queryCtxInitMs
                         - g_queryGraphMs - g_queryResultMs - g_queryCtxDeinitMs;
     double qps = g_queryTotalMs > 0 ? g_queryCount / (g_queryTotalMs / 1000.0) : 0;
     fprintf(stderr, "\n=== diskAnn search breakdown (%d queries) ===\n", g_queryCount);
     fprintf(stderr, "  total:          %8.1f ms  (avg %.3f ms/q, %.0f q/s)\n",
             g_queryTotalMs, avgTotal, qps);
-    fprintf(stderr, "  start node select:%7.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
-            g_queryStartNodeMs, avgStart, g_queryStartNodeMs/g_queryTotalMs*100);
     fprintf(stderr, "  context init:   %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             g_queryCtxInitMs, avgCtxInit, g_queryCtxInitMs/g_queryTotalMs*100);
     fprintf(stderr, "  graph traversal:%8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
@@ -2206,6 +2213,14 @@ static void diskAnnPrintSearchStats(void){
             g_queryCtxDeinitMs, avgCtxDeinit, g_queryCtxDeinitMs/g_queryTotalMs*100);
     fprintf(stderr, "  diskAnn other:  %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             diskAnnOther, diskAnnOther/g_queryCount, diskAnnOther/g_queryTotalMs*100);
+    fprintf(stderr, "  LSM page compress:   %8.1f ms  (%d calls, %.1f -> %.1f MB)\n",
+            g_lsmCompressMs, g_lsmCompressCalls,
+            (double)g_lsmCompressInBytes / (1024.0 * 1024.0),
+            (double)g_lsmCompressOutBytes / (1024.0 * 1024.0));
+    fprintf(stderr, "  LSM page decompress: %8.1f ms  (%d calls, %.1f -> %.1f MB)\n",
+            g_lsmUncompressMs, g_lsmUncompressCalls,
+            (double)g_lsmUncompressInBytes / (1024.0 * 1024.0),
+            (double)g_lsmUncompressOutBytes / (1024.0 * 1024.0));
     fprintf(stderr, "  vector search total:%5.1f ms\n", g_vectorSearchTotalMs);
     fprintf(stderr, "    vector parse: %8.1f ms\n", g_vectorSearchParseMs);
     fprintf(stderr, "    index lookup/open:%5.1f ms\n", g_vectorSearchLookupMs);
@@ -2246,7 +2261,16 @@ static void diskAnnPrintInsertStats(void){
     fprintf(stderr, "    build KV read path:%7.1f ms\n", g_totalBuildReadMs);
     fprintf(stderr, "    build KV write path:%6.1f ms\n", g_totalBuildWriteMs);
     fprintf(stderr, "    build distance:%7.1f ms\n", g_totalBuildDistMs);
-    fprintf(stderr, "    LSM autowork during build: %.1f ms\n", g_totalBuildLsmMs);
+    fprintf(stderr, "    LSM auto-compaction during insert: %.1f ms  (%d calls, %d pages)\n",
+            g_autoworkTotalMs, g_autoworkCalls, g_autoworkPages);
+    fprintf(stderr, "    LSM page compress:   %.1f ms  (%d calls, %.1f -> %.1f MB)\n",
+            g_lsmCompressMs, g_lsmCompressCalls,
+            (double)g_lsmCompressInBytes / (1024.0 * 1024.0),
+            (double)g_lsmCompressOutBytes / (1024.0 * 1024.0));
+    fprintf(stderr, "    LSM page decompress: %.1f ms  (%d calls, %.1f -> %.1f MB)\n",
+            g_lsmUncompressMs, g_lsmUncompressCalls,
+            (double)g_lsmUncompressInBytes / (1024.0 * 1024.0),
+            (double)g_lsmUncompressOutBytes / (1024.0 * 1024.0));
     fprintf(stderr, "    pass2 visited nodes: %lld  (avg %.2f/insert)\n",
             g_totalPass2Visited,
             (double)g_totalPass2Visited / g_totalInsertCount);
