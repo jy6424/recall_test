@@ -18,7 +18,7 @@ If you want to build separately, do
 
 ```
 make libsql
-make lsmobivec
+make lsmove
 make compact
 ```
 
