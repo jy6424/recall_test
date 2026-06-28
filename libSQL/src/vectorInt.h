@@ -1,7 +1,7 @@
 #ifndef _VECTOR_H
 #define _VECTOR_H
 
-#include "sqlite4.h"
+#include "sqlite3.h"
 #include "sqliteInt.h" // for u16/u32 types
 
 #ifdef __cplusplus
@@ -13,7 +13,7 @@ typedef struct Vector Vector;
 typedef u16 VectorType;
 typedef u32 VectorDims;
 
-/*
+/* 
  * Maximum dimensions for single vector in the DB. Any attempt to work with vector of bigger size will results to an error
  * (this is possible as user can write blob manually and later try to deserialize it)
 */
@@ -74,7 +74,7 @@ struct Vector {
 size_t vectorDataSize(VectorType, VectorDims);
 Vector *vectorAlloc(VectorType, VectorDims);
 void vectorFree(Vector *v);
-int vectorParseWithType(sqlite4_value *, Vector *, char **);
+int vectorParseWithType(sqlite3_value *, Vector *, char **);
 void vectorInit(Vector *, VectorType, VectorDims, void *);
 
 /*
@@ -91,14 +91,14 @@ void vector1BitDump(const Vector *v);
 void vectorF8GetParameters(const u8 *, int, float *, float *);
 void vectorF8SetParameters(u8 *, int, float, float);
 
-/*
- * Converts vector to the text representation and write the result to the sqlite4_context
+/* 
+ * Converts vector to the text representation and write the result to the sqlite3_context
 */
-void vectorMarshalToText   (sqlite4_context *, const Vector *);
-void vectorF32MarshalToText(sqlite4_context *, const Vector *);
-void vectorF64MarshalToText(sqlite4_context *, const Vector *);
+void vectorMarshalToText   (sqlite3_context *, const Vector *);
+void vectorF32MarshalToText(sqlite3_context *, const Vector *);
+void vectorF64MarshalToText(sqlite3_context *, const Vector *);
 
-/*
+/* 
  * Serializes vector to the blob in little-endian format according to the IEEE-754 standard
 */
 void vectorSerializeToBlob    (const Vector *, unsigned char *, size_t);
@@ -109,7 +109,7 @@ void vectorF32SerializeToBlob (const Vector *, unsigned char *, size_t);
 void vectorF64SerializeToBlob (const Vector *, unsigned char *, size_t);
 void vector1BitSerializeToBlob(const Vector *, unsigned char *, size_t);
 
-/*
+/* 
  * Calculates cosine distance between two vectors (vector must have same type and same dimensions)
 */
 float vectorDistanceCos    (const Vector *, const Vector *);
@@ -134,17 +134,17 @@ float vectorFB16DistanceL2(const Vector *, const Vector *);
 float vectorF32DistanceL2 (const Vector *, const Vector *);
 double vectorF64DistanceL2(const Vector *, const Vector *);
 
-/*
+/* 
  * Serializes vector to the sqlite_blob in little-endian format according to the IEEE-754 standard
  * libSQL can append one trailing byte in the end of final blob. This byte will be later used to determine type of the blob
  * By default, blob with even length will be treated as a f32 blob
 */
-void vectorSerializeWithMeta(sqlite4_context *, const Vector *);
+void vectorSerializeWithMeta(sqlite3_context *, const Vector *);
 
 /*
  * Parses Vector content from the blob; vector type and dimensions must be filled already
 */
-int vectorParseSqliteBlobWithType(sqlite4_value *, Vector *, char **);
+int vectorParseSqliteBlobWithType(sqlite3_value *, Vector *, char **);
 
 void vectorF8DeserializeFromBlob  (Vector *, const unsigned char *, size_t);
 void vectorF16DeserializeFromBlob (Vector *, const unsigned char *, size_t);
@@ -164,8 +164,8 @@ float vectorFB16ToFloat(u16);
 
 void vectorConvert(const Vector *, Vector *);
 
-/* Detect type and dimension of vector provided with first parameter of sqlite4_value * type */
-int detectVectorParameters(sqlite4_value *, int, int *, int *, char **);
+/* Detect type and dimension of vector provided with first parameter of sqlite3_value * type */
+int detectVectorParameters(sqlite3_value *, int, int *, int *, char **);
 
 static inline unsigned serializeF32(unsigned char *pBuf, float value){
   u32 *p = (u32 *)&value;

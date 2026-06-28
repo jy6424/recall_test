@@ -9,6 +9,7 @@ from datetime import datetime
 
 TIME_MARKER = "__TIME__"
 DISK_DEVICE = "mmcblk0p1"
+TOP_K = 10
 
 
 def _diskstats_devices():
@@ -357,10 +358,10 @@ def run_compact(compact_bin, db, env=None, lsm_compression="none"):
     return stderr_text, time_stats
 
 
-def build_compact_binary(lsm_dir):
-    compact_bin = os.path.join(lsm_dir, "compact_db")
-    compact_src = os.path.join(lsm_dir, "compact_db.c")
-    libsqlite4 = os.path.join(lsm_dir, "libsqlite4.a")
+def build_compact_binary(sqlite4_dir):
+    compact_bin = os.path.join(sqlite4_dir, "compact_db")
+    compact_src = os.path.join(sqlite4_dir, "compact_db.c")
+    libsqlite4 = os.path.join(sqlite4_dir, "libsqlite4.a")
 
     if os.path.isfile(compact_bin) and os.access(compact_bin, os.X_OK):
         return compact_bin
@@ -373,9 +374,9 @@ def build_compact_binary(lsm_dir):
 
     cmd = [
         "gcc", "-O2", compact_src,
-        "-I" + lsm_dir,
-        "-I" + os.path.join(lsm_dir, "src"),
-        "-L" + lsm_dir,
+        "-I" + sqlite4_dir,
+        "-I" + os.path.join(sqlite4_dir, "src"),
+        "-L" + sqlite4_dir,
         "-lsqlite4", "-lpthread", "-lm", "-lz", "-llz4",
         "-o", compact_bin,
     ]
@@ -426,12 +427,15 @@ def build_schema_sql(schema_lines, page_size_kb):
 
 
 def prepare_insert_sql(sql_text, page_size_kb, is_sqlite3=False,
-                       use_compaction=False, lsm_autoflush_mb=None):
+                       use_compaction=False, lsm_autoflush_mb=None,
+                       lsm_automerge=None):
     pragmas = []
     if page_size_kb is not None:
         pragmas.append(f"PRAGMA page_size={page_size_kb * 1024};")
     if not is_sqlite3 and lsm_autoflush_mb is not None:
         pragmas.append(f"PRAGMA lsm_autoflush={lsm_autoflush_mb * 1024};")
+    if not is_sqlite3 and lsm_automerge is not None:
+        pragmas.append(f"PRAGMA lsm_automerge={lsm_automerge};")
     if not pragmas:
         return sql_text
     return "\n".join(pragmas) + "\n" + sql_text
@@ -508,6 +512,10 @@ def parse_diskann_stats(stderr_text):
     grab(r'VDBE work:\s*([\d.]+)\s+ms', 'insert_vdbe_work_ms')
     grab(r'insert VDBE other:\s*([\d.]+)\s+ms', 'insert_vdbe_work_ms')
     grab(r'statement finish:\s*([\d.]+)\s+ms', 'insert_stmt_finish_ms')
+    grab(r'KV commit total:\s*([\d.]+)\s+ms', 'insert_kv_commit_total_ms')
+    grab(r'KV commit LSM work:\s*([\d.]+)\s+ms', 'insert_kv_commit_lsm_ms')
+    grab(r'KV commit no LSM:\s*([\d.]+)\s+ms', 'insert_kv_commit_no_lsm_ms')
+    grab(r'Btree commit total:\s*([\d.]+)\s+ms', 'insert_btree_commit_total_ms')
     grab(r'shell db close:\s*([\d.]+)\s+ms', 'shell_close_ms')
     grab(r'shell statements:\s*(\d+)', 'shell_stmt_count', int)
     grab(r'shell prepare:\s*([\d.]+)\s+ms', 'shell_prepare_ms')
@@ -626,9 +634,9 @@ def format_io_summary(io_stats):
 
 def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                    gt_results, k, db_dir, is_sqlite3=False, use_compaction=True,
-                   do_drop_cache=False, io_log_dir=None,
-                   page_size_kb=None, lsm_compression="none", disk_device=DISK_DEVICE,
-                   query_only=False):
+                   do_drop_cache=False, page_size_kb=None,
+                   lsm_compression="none", disk_device=DISK_DEVICE,
+                   search_only=False):
     db_path = os.path.join(db_dir, f"bench_{label}.db")
     db_target = build_db_target(
         db_path,
@@ -637,16 +645,16 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         lsm_compression=lsm_compression,
         use_compaction=use_compaction,
     )
-    if not query_only:
+    if not search_only:
         cleanup_db(db_path, is_sqlite3)
     elif not os.path.exists(db_path):
-        raise FileNotFoundError(f"query-only DB not found: {db_path}")
+        raise FileNotFoundError(f"search-only DB not found: {db_path}")
     child_env = os.environ.copy()
     child_env["DISKANN_IO_TIMING"] = "1"
 
     result = {"label": label}
-    need_compact = not query_only and not is_sqlite3 and use_compaction and compact_bin
-    n_phases = 2 if query_only else (4 if need_compact else 3)
+    need_compact = not search_only and not is_sqlite3 and use_compaction and compact_bin
+    n_phases = 2 if search_only else (4 if need_compact else 3)
 
     print(f"\n{'='*60}")
     print(f"  Config: {label}")
@@ -663,7 +671,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     result["insert_time_stats"] = {}
     result["ins_stats"] = {}
 
-    if query_only:
+    if search_only:
         print(f"  Using existing DB: {db_path} ({size_before:.1f} MB)")
     else:
         print(f"  [1/{n_phases}] Schema + Insert...")
@@ -672,8 +680,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         # transaction statements in the SQL file stay in their original order.
         insert_sql = read_sql(insert_sql_path)
         drop_caches(do_drop_cache)
-        insert_log = os.path.join(io_log_dir, f"{label}_insert_io.csv") if io_log_dir else None
-        insert_mon = DiskStatsMonitor(disk_device, log_path=insert_log).start()
+        insert_mon = DiskStatsMonitor(disk_device).start()
         t0 = time.time()
         ins_out, ins_err, ins_time = run_shell(shell, db_target, insert_sql, env=child_env)
         t_insert = time.time() - t0
@@ -704,28 +711,41 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
             )
         if ins_stats.get('build_total_ms') is not None:
             stmt_s = ins_stats.get('insert_stmt_total_ms', 0) / 1000
+            commit_s = ins_stats.get(
+                'insert_kv_commit_no_lsm_ms',
+                ins_stats.get(
+                    'insert_btree_commit_total_ms',
+                    ins_stats.get('insert_stmt_finish_ms', 0)
+                )
+            ) / 1000
             finish_s = ins_stats.get('insert_stmt_finish_ms', 0) / 1000
+            commit_total_s = ins_stats.get('insert_kv_commit_total_ms', 0) / 1000
+            commit_lsm_s = ins_stats.get('insert_kv_commit_lsm_ms', 0) / 1000
             wal_s = ins_stats.get('step_wal_ms', 0) / 1000
             build_s = ins_stats.get('build_total_ms', 0) / 1000
             shadow_s = ins_stats.get('shadow_insert_ms', 0) / 1000
             graph_s = ins_stats.get('graph_build_ms', 0) / 1000
             traversal_s = ins_stats.get('build_traversal_ms', 0) / 1000
             edge_update_s = ins_stats.get('build_edge_update_ms', 0) / 1000
-            read_s = ins_stats.get('build_read_ms', 0) / 1000
-            write_s = ins_stats.get('build_write_ms', 0) / 1000
             dist_s = ins_stats.get('build_dist_ms', 0) / 1000
             lsm_compact_s = ins_stats.get('insert_lsm_compact_ms', 0) / 1000
             pg_comp_s = ins_stats.get('lsm_page_compress_ms', 0) / 1000
             pg_decomp_s = ins_stats.get('lsm_page_decompress_ms', 0) / 1000
             print(
-                f"        Stmt={stmt_s:.1f}s  Commit={finish_s:.1f}s  "
+                f"        Stmt={stmt_s:.1f}s  Commit={commit_s:.1f}s  "
                 f"Checkpt={wal_s:.1f}s  VecBuild={build_s:.1f}s  "
                 f"Shadow={shadow_s:.1f}s  GraphBuild={graph_s:.1f}s  "
                 f"BuildTrav={traversal_s:.1f}s  EdgeUpd={edge_update_s:.1f}s  "
-                f"ReadPath={read_s:.1f}s  WritePath={write_s:.1f}s  Dist={dist_s:.1f}s  "
-                f"LSMComp={lsm_compact_s:.1f}s  PgComp={pg_comp_s:.1f}s  "
+                f"Dist={dist_s:.1f}s  LSMComp={lsm_compact_s:.1f}s  PgComp={pg_comp_s:.1f}s  "
                 f"PgDecomp={pg_decomp_s:.1f}s"
             )
+            if ins_stats.get('insert_kv_commit_total_ms') is not None:
+                print(
+                    f"        Finish={finish_s:.1f}s  CommitTotal={commit_total_s:.1f}s  "
+                    f"CommitLSM={commit_lsm_s:.1f}s"
+                )
+            elif ins_stats.get('insert_btree_commit_total_ms') is not None:
+                print(f"        Finish={finish_s:.1f}s")
             if ins_stats.get('step_api_ms') is not None:
                 print(
                     f"        StepApi={ins_stats.get('step_api_ms', 0)/1000:.1f}s  "
@@ -780,13 +800,12 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
         result["compact_size_mb"] = round(size_before, 1)
 
     # Query (timed)
-    phase_q = 1 if query_only else (3 if need_compact else 2)
+    phase_q = 1 if search_only else (3 if need_compact else 2)
     print(f"  [{phase_q}/{n_phases}] Querying...")
     query_sql = read_sql(query_sql_path)
 
     drop_caches(do_drop_cache)
-    query_log = os.path.join(io_log_dir, f"{label}_query_io.csv") if io_log_dir else None
-    query_mon = DiskStatsMonitor(disk_device, log_path=query_log).start()
+    query_mon = DiskStatsMonitor(disk_device).start()
     t0 = time.time()
     ann_out, q_err, q_time_stats = run_shell(shell, db_target, query_sql, env=child_env)
     t_query = time.time() - t0
@@ -821,7 +840,6 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
             f"        SearchTotal={q_stats.get('search_total_ms', 0):.0f}ms  "
             f"CtxInit={q_stats.get('ctx_init_ms', 0):.0f}ms  "
             f"Graph={q_stats.get('graph_ms', 0):.0f}ms  "
-            f"ReadPath={q_stats.get('query_read_ms', 0):.0f}ms  "
             f"QueryDist={q_stats.get('query_dist_ms', 0):.0f}ms  "
             f"Result={q_stats.get('result_ms', 0):.0f}ms  "
             f"CtxDeinit={q_stats.get('ctx_deinit_ms', 0):.0f}ms"
@@ -879,10 +897,9 @@ def main():
                         help="Directory with SQL files (default: ./dataset)")
     parser.add_argument("--datasets", type=str, default="sift,glove,coco,cohere",
                         help="Comma-separated dataset names (default: sift,glove,coco,cohere)")
-    parser.add_argument("--k", type=int, default=10)
-    parser.add_argument("--lsm-dir", type=str, default="./LSMoVe",
+    parser.add_argument("--sqlite4-dir", type=str, default="./LSMoVe",
                         help="Directory containing the LSMoVe/sqlite4 shell and optional compact_db")
-    parser.add_argument("--sqlite3-dir", type=str, default="./LibSQL",
+    parser.add_argument("--sqlite3-dir", type=str, default="./libSQL",
                         help="Directory containing sqlite3")
     parser.add_argument("--db-dir", type=str, default=".")
     parser.add_argument("--page-sizes", type=str, default="4,16,32,64")
@@ -890,16 +907,16 @@ def main():
                         help="LSM storage page compression for LSMoVe configs")
     parser.add_argument("--lsm-autoflush-mb", type=int, default=None,
                         help="Set LSM autoflush threshold in MB for LSMoVe configs")
-    parser.add_argument("--use-compaction", type=int, default=0, choices=[0, 1],
+    parser.add_argument("--lsm-automerge", type=int, default=None,
+                        help="Set LSM automerge segment threshold for LSMoVe configs")
+    parser.add_argument("--lsm-use-compaction", type=int, default=0, choices=[0, 1],
                         help="1: use compact_db after insert for LSMoVe configs, 0: skip compact_db")
     parser.add_argument("--drop-cache", action="store_true",
                         help="Drop OS page cache before each timed phase (requires sudo)")
     parser.add_argument("--disk-device", type=str, default="auto",
                         help="Block device name from /proc/diskstats, or 'auto' to detect from --db-dir")
-    parser.add_argument("--io-log-dir", type=str, default="./io_logs",
-                        help="Directory to store disk I/O CSV logs")
-    parser.add_argument("--query-only", action="store_true",
-                        help="Run query and recall only using existing bench_*.db files")
+    parser.add_argument("--search-only", action="store_true",
+                        help="Run search and recall only using existing bench_*.db files")
     parser.add_argument("--keep-db", action="store_true",
                         help="Keep generated bench_*.db files after all runs")
     args = parser.parse_args()
@@ -909,6 +926,9 @@ def main():
     if args.lsm_autoflush_mb is not None and args.lsm_autoflush_mb <= 0:
         print("Error: --lsm-autoflush-mb must be positive.")
         return 1
+    if args.lsm_automerge is not None and args.lsm_automerge <= 1:
+        print("Error: --lsm-automerge must be greater than 1.")
+        return 1
 
     # Validate datasets
     datasets = []
@@ -916,7 +936,7 @@ def main():
         insert_sql = os.path.join(args.dataset_dir, f"insert100k_{name}.sql")
         query_sql = os.path.join(args.dataset_dir, f"query10k_{name}.sql")
         gt_file = os.path.join(args.dataset_dir, f"groundtruth_{name}.txt")
-        required = [query_sql, gt_file] if args.query_only else [insert_sql, query_sql, gt_file]
+        required = [query_sql, gt_file] if args.search_only else [insert_sql, query_sql, gt_file]
         missing = [f for f in required if not os.path.isfile(f)]
         if missing:
             print(f"Warning: skipping dataset '{name}', missing: {missing}")
@@ -927,17 +947,17 @@ def main():
         print("Error: no valid datasets found.")
         return 1
 
-    use_compaction = bool(args.use_compaction)
+    use_compaction = bool(args.lsm_use_compaction)
 
     # Build configs: (label, shell, compact_bin_or_None, is_sqlite3, page_size_kb)
     configs = []
 
-    if args.lsm_dir:
-        shell = os.path.join(args.lsm_dir, "sqlite4")
+    if args.sqlite4_dir:
+        shell = os.path.join(args.sqlite4_dir, "sqlite4")
         if not os.path.isfile(shell):
             print("Warning: LSMoVe sqlite4 shell missing, skipping LSMoVe configs")
         else:
-            compact_bin = build_compact_binary(args.lsm_dir) if use_compaction else None
+            compact_bin = build_compact_binary(args.sqlite4_dir) if use_compaction else None
             if use_compaction and compact_bin is None:
                 print("Warning: compact_db unavailable, skipping LSMoVe configs")
             else:
@@ -963,9 +983,9 @@ def main():
     print(f"Configs:      {', '.join(cfg[0] for cfg in configs)}")
     print(f"LSM compression: {args.lsm_compression}")
     print(f"LSM autoflush: {'default' if args.lsm_autoflush_mb is None else str(args.lsm_autoflush_mb) + ' MB'}")
+    print(f"LSM automerge: {'default' if args.lsm_automerge is None else args.lsm_automerge}")
     print(f"Compaction:   {'ON (use compact_db)' if use_compaction else 'OFF'}")
     print(f"Disk device:  /dev/{disk_device}" + (" (auto)" if args.disk_device == "auto" else ""))
-    print(f"I/O log dir:  {args.io_log_dir}")
     print(f"DB dir:       {args.db_dir}")
     print(f"Total runs:   {len(datasets) * len(configs)}")
 
@@ -983,7 +1003,7 @@ def main():
         for label, shell, compact_bin, is_s3, ps_kb in configs:
             run_label = f"{ds_name}_{label}"
             insert_sql_prepared = None
-            if not args.query_only:
+            if not args.search_only:
                 insert_sql_text = read_sql(insert_sql)
                 prepared_sql = prepare_insert_sql(
                     insert_sql_text,
@@ -991,17 +1011,18 @@ def main():
                     is_sqlite3=is_s3,
                     use_compaction=use_compaction,
                     lsm_autoflush_mb=args.lsm_autoflush_mb,
+                    lsm_automerge=args.lsm_automerge,
                 )
                 insert_sql_prepared = os.path.join(args.db_dir, f".schema_{run_label}.sql")
                 with open(insert_sql_prepared, "w") as f:
                     f.write(prepared_sql + "\n")
             result = run_one_config(
                 run_label, shell, compact_bin, insert_sql_prepared, query_sql,
-                gt_results, args.k, args.db_dir, is_sqlite3=is_s3,
+                gt_results, TOP_K, args.db_dir, is_sqlite3=is_s3,
                 use_compaction=use_compaction, do_drop_cache=args.drop_cache,
-                io_log_dir=args.io_log_dir, page_size_kb=ps_kb,
-                lsm_compression=args.lsm_compression, disk_device=disk_device,
-                query_only=args.query_only
+                page_size_kb=ps_kb, lsm_compression=args.lsm_compression,
+                disk_device=disk_device,
+                search_only=args.search_only
             )
             ds_results.append(result)
 
@@ -1022,29 +1043,28 @@ def main():
         ins_hdr = (
             f"{'Overall':>8} {'Stmt':>8} {'Commit':>8} {'Checkpt':>8} "
             f"{'VecBuild':>8} {'Shadow':>8} {'Trav':>8} {'EdgeUpd':>8} "
-            f"{'ReadPath':>8} "
-            f"{'WritePath':>9} {'Dist':>8} {'LSMComp':>8} {'PgComp':>8} {'PgDecomp':>8}"
+            f"{'Dist':>8} {'LSMComp':>8} {'PgComp':>8} {'PgDecomp':>8}"
         )
         ins_sub = (
             f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} "
             f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8} "
-            f"{'(s)':>8} {'(s)':>9} {'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8}"
+            f"{'(s)':>8} {'(s)':>8} {'(s)':>8} {'(s)':>8}"
         )
         if show_compact:
             ins_hdr += f" {'Compact':>8}"
             ins_sub += f" {'(s)':>8}"
         q_hdr = (
-            f"{'Overall':>8} {'Graph':>8} {'ReadPath':>8} {'Dist':>8} "
+            f"{'Overall':>8} {'Graph':>8} {'Dist':>8} "
             f"{'Result':>8} {'PgComp':>8} {'PgDecomp':>8} {'Q/s':>8} {'Recall':>8}"
         )
         q_sub = (
-            f"{'(s)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} "
+            f"{'(s)':>8} {'(ms)':>8} {'(ms)':>8} {'(ms)':>8} "
             f"{'(ms)':>8} {'(ms)':>8} {'':>8} {'@k':>8}"
         )
         hdr = f"{'Config':>16} |{ins_hdr} |{q_hdr} | {'Size':>8}"
         sub = f"{'':>16} |{ins_sub} |{q_sub} | {'(MB)':>8}"
         w = len(hdr)
-        title = f"SUMMARY: {ds_name} (k={args.k})"
+        title = f"SUMMARY: {ds_name} (k={TOP_K})"
         print(f"\n{'='*w}")
         print(f"{title:^{w}}")
         print(f"{'='*w}")
@@ -1058,14 +1078,18 @@ def main():
             short_label = r['label'].replace(f"{ds_name}_", "")
             ist = r.get('ins_stats', {})
             stmt_s = ist.get('insert_stmt_total_ms', 0) / 1000
-            finish_s = ist.get('insert_stmt_finish_ms', 0) / 1000
+            finish_s = ist.get(
+                'insert_kv_commit_no_lsm_ms',
+                ist.get(
+                    'insert_btree_commit_total_ms',
+                    ist.get('insert_stmt_finish_ms', 0)
+                )
+            ) / 1000
             wal_s = ist.get('step_wal_ms', 0) / 1000
             build_s = ist.get('build_total_ms', 0) / 1000
             shadow_s = ist.get('shadow_insert_ms', 0) / 1000
             traversal_s = ist.get('build_traversal_ms', 0) / 1000
             edge_update_s = ist.get('build_edge_update_ms', 0) / 1000
-            read_s = ist.get('build_read_ms', 0) / 1000
-            write_s = ist.get('build_write_ms', 0) / 1000
             dist_s = ist.get('build_dist_ms', 0) / 1000
             lsm_compact_s = ist.get('insert_lsm_compact_ms', 0) / 1000
             pg_comp_s = ist.get('lsm_page_compress_ms', 0) / 1000
@@ -1075,8 +1099,7 @@ def main():
                         f"{stmt_s:>8.1f} {finish_s:>8.1f} {wal_s:>8.1f} "
                         f"{build_s:>8.1f} "
                         f"{shadow_s:>8.1f} {traversal_s:>8.1f} {edge_update_s:>8.1f} "
-                        f"{read_s:>8.1f} "
-                        f"{write_s:>9.1f} {dist_s:>8.1f} {lsm_compact_s:>8.1f} "
+                        f"{dist_s:>8.1f} {lsm_compact_s:>8.1f} "
                         f"{pg_comp_s:>8.1f} {pg_decomp_s:>8.1f}")
             if show_compact:
                 compact_str = f"{r['compact_time_s']:>8.1f}" if r['compact_time_s'] > 0 else f"{'---':>8}"
@@ -1084,7 +1107,6 @@ def main():
             q_vals = (
                 f"{r['query_time_s']:>8.1f} "
                 f"{qst.get('graph_ms', 0):>8.1f} "
-                f"{qst.get('query_read_ms', 0):>8.1f} "
                 f"{qst.get('query_dist_ms', 0):>8.1f} "
                 f"{qst.get('result_ms', 0):>8.1f} "
                 f"{qst.get('lsm_page_compress_ms', 0):>8.1f} "

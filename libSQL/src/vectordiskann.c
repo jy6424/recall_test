@@ -22,16 +22,32 @@
 **
 ******************************************************************************
 **
-** DiskANN for SQLite4/libSQL.
-** Ported from veclite (SQLite3-based) to SQLite4 API.
+** DiskANN for SQLite/libSQL.
 **
-** Key differences from the SQLite3 version:
-**  - No sqlite4_blob API: blob I/O is done via prepared SELECT/UPDATE statements
-**  - No rowid concept: shadow table uses index_key (= base table INTEGER PK)
-**  - Only rowid-like (single INTEGER PK) tables are supported
-**  - All API uses sqlite4_* prefix and SQLITE4_* constants
+** The algorithm is described in the following publications:
+**
+**   Suhas Jayaram Subramanya et al (2019). DiskANN: Fast Accurate Billion-point
+**   Nearest Neighbor Search on a Single Node. In NeurIPS 2019.
+**
+**   Aditi Singh et al (2021). FreshDiskANN: A Fast and Accurate Graph-Based ANN
+**   Index for Streaming Similarity Search. ArXiv.
+**
+**   Yu Pan et al (2023). LM-DiskANN: Low Memory Footprint in Disk-Native
+**   Dynamic Graph-Based ANN Indexing. In IEEE BIGDATA 2023.
+**
+** Here is the (internal, non-API) interface between this module and the
+** rest of the SQLite system:
+**
+**    diskAnnCreateIndex()     Create new index and fill default values for diskann parameters (if some of them are omitted)
+**    diskAnnDropIndex()       Delete existing index
+**    diskAnnClearIndex()      Truncate existing index
+**    diskAnnOpenIndex()       Open index for operations (allocate all necessary internal structures)
+**    diskAnnCloseIndex()      Close index and free associated resources
+**    diskAnnSearch()          Search K nearest neighbours to the query vector in an opened index
+**    diskAnnInsert()          Insert single new(!) vector in an opened index
+**    diskAnnDelete()          Delete row by key from an opened index
 */
-#ifndef SQLITE4_OMIT_VECTOR
+#ifndef SQLITE_OMIT_VECTOR
 
 #include "math.h"
 #include <stdlib.h>
@@ -40,56 +56,61 @@
 #include "sqliteInt.h"
 #include "vectorIndexInt.h"
 
-/* Forward declarations for per-operation KV timing (accumulated in blobSpot functions) */
-static double g_totalKvReadMs;
-static double g_totalKvWriteMs;
-static double g_totalKvCursorOpenMs;
-static double g_totalKvSeekMs;
-static double g_totalKvDataMs;
-static double g_totalKvDecodeMs;
-static double g_totalKvMemcpyMs;
-static long long g_searchEdgesTotal;
+/* Per-operation I/O timing (accumulated in blobSpot functions) */
+static double g_totalBlobReadMs;
+static double g_totalBlobWriteMs;
+static double g_totalBlobOpenMs;
+static double g_totalBlobReopenMs;
+static double g_totalBlobReadCallMs;
+static int g_totalBlobCacheHits;
+static int g_totalBlobCacheMisses;
+static double g_totalInsertStmtMs;
+static double g_totalInsertOtherMs;
+static double g_totalInsertFinishMs;
+extern double g_btreeCommitTotalMs;
 static int g_searchVisitedTotal;
+static long long g_searchEdgesTotal;
 
-/* Search-specific stats (accumulated across all diskAnnSearch calls) */
-static int g_queryCount = 0;
-static double g_queryTotalMs = 0;       /* total wall-clock time */
-static double g_queryGraphMs = 0;       /* graph traversal (diskAnnSearchInternal) */
-static double g_queryResultMs = 0;      /* result collection */
-static double g_queryStartNodeMs = 0;   /* start-node selection */
-static double g_queryCtxInitMs = 0;     /* search context initialization */
-static double g_queryCtxDeinitMs = 0;   /* search context cleanup */
-static double g_queryKvReadMs = 0;      /* KV read path during search only */
-static double g_queryKvCursorOpenMs = 0;
-static double g_queryKvSeekMs = 0;
-static double g_queryKvDataMs = 0;
-static double g_queryKvDecodeMs = 0;
-static double g_queryKvMemcpyMs = 0;
-static int g_queryKvReads = 0;          /* KV read count during search only */
-static int g_queryNodesVisited = 0;     /* total nodes visited across all queries */
-static long long g_queryEdgesExamined = 0; /* total edges examined */
-static double g_queryDistanceMs = 0;    /* distance computation time */
-static double g_buildDistanceMs = 0;    /* distance computation during build */
-static double g_vectorSearchTotalMs = 0;
-static double g_vectorSearchParseMs = 0;
-static double g_vectorSearchLookupMs = 0;
-static double g_vectorSearchDiskAnnMs = 0;
-static double g_vectorSearchCloseMs = 0;
+/* Insert stats */
+static double g_totalSearchMs;
+static double g_totalShadowInsMs;
+static double g_totalPass1Ms;
+static double g_totalPass2Ms;
+static double g_totalFlushMs;
+static double g_totalIndexBuildMs;
+static int g_totalInsertCount;
+static int g_totalInsertStmtCount;
+static int g_totalIndexBuildCount;
+static int g_atexitRegistered;
 
-/* Auto-compaction timing globals from lsm_sorted.c */
-extern double g_autoworkTotalMs;
-extern int g_autoworkCalls;
-extern int g_autoworkPages;
-extern double g_lsmCompressMs;
-extern double g_lsmUncompressMs;
-extern int g_lsmCompressCalls;
-extern int g_lsmUncompressCalls;
-extern long long g_lsmCompressInBytes;
-extern long long g_lsmCompressOutBytes;
-extern long long g_lsmUncompressInBytes;
-extern long long g_lsmUncompressOutBytes;
-extern double g_kvCommitTotalMs;
-extern double g_kvCommitLsmMs;
+/* Search-specific stats */
+static int g_queryCount;
+static double g_queryTotalMs;
+static double g_queryGraphMs;
+static double g_queryResultMs;
+static double g_queryStartNodeMs;
+static double g_queryCtxInitMs;
+static double g_queryCtxDeinitMs;
+static double g_queryBlobReadMs;
+static double g_queryBlobOpenMs;
+static double g_queryBlobReopenMs;
+static double g_queryBlobReadCallMs;
+static int g_queryBlobCacheHits;
+static int g_queryBlobCacheMisses;
+static int g_queryBlobReads;
+static int g_queryNodesVisited;
+static long long g_queryEdgesExamined;
+static double g_queryDistanceMs;
+static double g_vectorSearchTotalMs;
+static double g_vectorSearchParseMs;
+static double g_vectorSearchLookupMs;
+static double g_vectorSearchDiskAnnMs;
+static double g_vectorSearchCloseMs;
+static double g_buildDistanceMs;
+static double g_totalBuildReadMs;
+static double g_totalBuildWriteMs;
+static double g_totalBuildDistMs;
+static int g_distTimingMode = 0; /* 0=off, 1=query, 2=build */
 static int g_ioTimingEnabled = -1;
 
 static double diskAnnMsBetween(struct timespec *p0, struct timespec *p1){
@@ -104,17 +125,21 @@ static int diskAnnIoTimingEnabled(void){
   return g_ioTimingEnabled;
 }
 
-// #define SQLITE4_VECTOR_TRACE
-#if defined(SQLITE4_DEBUG) && defined(SQLITE4_VECTOR_TRACE)
-#define DiskAnnTrace(X) sqlite4DebugPrintf X;
+// #define SQLITE_VECTOR_TRACE
+#if defined(SQLITE_DEBUG) && defined(SQLITE_VECTOR_TRACE)
+#define DiskAnnTrace(X) sqlite3DebugPrintf X;
 #else
 #define DiskAnnTrace(X)
 #endif
 
-/* limit to the sql part which we render in order to perform operations with shadow table */
+// limit to the sql part which we render in order to perform operations with shadow table
+// we render this parts of SQL on stack - thats why we have hard limit on this
+// stack simplify memory managment code and also doesn't impose very strict limits here since 128 bytes for column names should be enough for almost all use cases
 #define DISKANN_SQL_RENDER_LIMIT 128
 
-/* limit to the maximum size of DiskANN block (128 MB) */
+// limit to the maximum size of DiskANN block (128 MB)
+// even with 1MB we can store tens of thousands of nodes in several GBs - which is already too much
+// but we are "generous" here and allow user to store up to 128MB blobs
 #define DISKANN_MAX_BLOCK_SZ 134217728
 
 /*
@@ -128,7 +153,8 @@ typedef struct VectorPair VectorPair;
 typedef struct DiskAnnSearchCtx DiskAnnSearchCtx;
 typedef struct DiskAnnNode DiskAnnNode;
 
-/* VectorPair represents single vector where pNode is an exact representation and pEdge - compressed representation */
+// VectorPair represents single vector where pNode is an exact representation and pEdge - compressed representation 
+// (pEdge pointer always equals to pNode if pNodeType == pEdgeType)
 struct VectorPair {
   int nodeType;
   int edgeType;
@@ -136,30 +162,33 @@ struct VectorPair {
   Vector *pEdge;
 };
 
-/* DiskAnnNode represents single node in the DiskAnn graph */
+// DiskAnnNode represents single node in the DiskAnn graph
 struct DiskAnnNode {
   u64 nRowid;           /* node id */
   int visited;          /* is this node visited? */
   DiskAnnNode *pNext;   /* next node in the visited list */
-  BlobSpot *pBlobSpot;  /* reference to the blob with node data */
+  BlobSpot *pBlobSpot;  /* reference to the blob with node data (can be NULL when data actually is not needed; for example - node waiting in the queue) */
 };
 
 /*
  * DiskAnnSearchCtx stores information required for search operation to succeed
+ *
+ * search context usually "borrows" candidates (storing them in aCandidates or visitedList)
+ * so caller which puts nodes in the context can forget about resource managmenet (context will take care of this)
 */
 struct DiskAnnSearchCtx {
-  VectorPair query;             /* initial query vector */
-  DiskAnnNode **aCandidates;    /* array of unvisited candidates ordered by distance */
-  float *aDistances;            /* array of distances to the query vector */
+  VectorPair query;             /* initial query vector; user query for SELECT and row vector for INSERT */
+  DiskAnnNode **aCandidates;    /* array of unvisited candidates ordered by distance (possibly approximate) to the query (ascending) */
+  float *aDistances;            /* array of distances (possible approximate) to the query vector */
   unsigned int nCandidates;     /* current size of aCandidates/aDistances arrays */
   unsigned int maxCandidates;   /* max size of aCandidates/aDistances arrays */
   DiskAnnNode **aTopCandidates; /* top candidates with exact distance calculated */
   float *aTopDistances;         /* top candidates exact distances */
   int nTopCandidates;           /* current size of aTopCandidates/aTopDistances arrays */
   int maxTopCandidates;         /* max size of aTopCandidates/aTopDistances arrays */
-  DiskAnnNode *visitedList;     /* list of all visited candidates */
-  unsigned int nUnvisited;      /* amount of unvisited candidates in the aCandidates array */
-  int blobMode;                 /* DISKANN_BLOB_READONLY or DISKANN_BLOB_WRITABLE */
+  DiskAnnNode *visitedList;     /* list of all visited candidates (so, candidates from aCandidates array either got replaced or moved to the visited list) */
+  unsigned int nUnvisited;      /* amount of unvisited candidates in the aCadidates array */
+  int blobMode;                 /* DISKANN_BLOB_READONLY if we wont modify node blobs; DISKANN_BLOB_WRITABLE - otherwise */
 };
 
 /**************************************************************************
@@ -209,159 +238,43 @@ static inline void writeLE64(unsigned char *p, u64 v){
 }
 
 /**************************************************************************
-** BlobSpot utilities — Direct KV store access
-**
-** In sqlite4, there is no incremental blob API (sqlite4_blob_*).
-** BlobSpot uses direct KV store access to bypass VDBE overhead:
-**  - Read:  fresh KV cursor → seek → data extraction → close
-**  - Write: KV store replace with encoded data record
-**
-** KV key format:  varint(shadow_tnum) + encoded_int_key(rowid)
-** KV value format: sqlite4 data record (2-column: integer + blob)
-**   = varint(hdr_size) + byte(int_type) + varint(blob_type)
-**     + int_bytes(big-endian) + raw_blob_bytes
-**
-** CRITICAL: sqlite4KVCursorSeek with dir=0 returns SQLITE4_INEXACT when
-** the exact key is not found (cursor lands on a nearby key). This MUST
-** be treated as NOTFOUND — reading the wrong row corrupts the graph.
+** BlobSpot utilities
 **************************************************************************/
 
-/* Forward declarations — defined in vdbecodec.c, declared in vdbeInt.h */
-int sqlite4VdbeEncodeIntKey(u8 *aBuf, sqlite4_int64 v);
-int sqlite4VdbeDecodeNumericKey(const KVByteArray*, KVSize, sqlite4_num*);
-
-/*
-** Build a KV key for a shadow table row:
-**   key = pIndex->aKeyPrefix (varint-encoded tnum) + encoded_int_key(rowid)
-*/
-static int blobSpotBuildKey(const DiskAnnIndex *pIndex, i64 nRowid, u8 *aKey){
-  int n = pIndex->nKeyPrefix;
-  memcpy(aKey, pIndex->aKeyPrefix, n);
-  n += sqlite4VdbeEncodeIntKey(aKey + n, nRowid);
-  return n;
+// sqlite3_blob_* API return SQLITE_ERROR in any case but we need to distinguish between "row not found" and other errors in some cases
+static int blobSpotConvertRc(const DiskAnnIndex *pIndex, int rc){
+  if( rc == SQLITE_ERROR && strncmp(sqlite3_errmsg(pIndex->db), "no such rowid", 13) == 0 ){
+    return DISKANN_ROW_NOT_FOUND;
+  }
+  return rc;
 }
 
-/*
-** Decode a sqlite4 data record to extract the BLOB column (column 1).
-** The shadow table has 2 columns: (index_key INTEGER PK, data BLOB).
-** The VDBE encodes ALL columns in the data record:
-**   varint(hdr_size) + type_code_col0 + type_code_col1 + payload_col0 + payload_col1
-** Returns pointer to blob data within pData, and sets *pnBlob to its size.
-*/
-static const u8 *blobSpotDecodeRecord(const u8 *pData, int nData, int *pnBlob){
-  u64 hdrSize, typeCode;
-  int nHdr, n, nBlob;
-  int payloadOff;
-  int col0Size;
-
-  nHdr = sqlite4GetVarint64(pData, nData, &hdrSize);
-  if( nHdr <= 0 || nHdr + (int)hdrSize > nData ) return 0;
-
-  payloadOff = nHdr + (int)hdrSize;
-
-  /* Column 0 type code (integer) */
-  n = sqlite4GetVarint64(pData + nHdr, nData - nHdr, &typeCode);
-  if( n <= 0 ) return 0;
-
-  if( typeCode == 0 ){
-    col0Size = 0;
-  }else if( typeCode >= 2 && typeCode <= 10 ){
-    col0Size = (int)(typeCode - 2);
-  }else{
-    return 0;
-  }
-
-  /* Column 1 type code (blob) */
-  {
-    int n2;
-    u64 blobTypeCode;
-    n2 = sqlite4GetVarint64(pData + nHdr + n, nData - nHdr - n, &blobTypeCode);
-    if( n2 <= 0 ) return 0;
-    if( blobTypeCode < 23 || (blobTypeCode & 3) != 3 ) return 0;
-
-    nBlob = (int)((blobTypeCode - 23) / 4);
-    *pnBlob = nBlob;
-    return pData + payloadOff + col0Size;
-  }
-}
-
-/*
-** Encode a 2-column sqlite4 data record (INTEGER + BLOB).
-** Format matches what sqlite4VdbeEncodeData produces.
-** Caller must provide aOut with at least (30 + nBlob) bytes.
-** Returns total encoded size.
-*/
-static int blobSpotEncodeRecord(i64 nRowid, const u8 *pBlob, int nBlob, u8 *aOut){
-  u8 aHdrBuf[18];
-  int nHdrContent;
-  int nHdrSizeVarint;
-  int nn;
-  int nIntBytes;
-
-  /* significantBytes — matches sqlite4VdbeEncodeData */
-  {
-    i64 v = nRowid;
-    i64 x;
-    nIntBytes = 1;
-    if( v < 0 ){
-      x = -128;
-      while( v < x && nIntBytes < 8 ){ nIntBytes++; x *= 256; }
-    }else{
-      x = 127;
-      while( v > x && nIntBytes < 8 ){ nIntBytes++; x *= 256; }
-    }
-  }
-
-  /* Header: int type code + blob type code */
-  {
-    int p = 0;
-    aHdrBuf[p++] = (u8)(nIntBytes + 2);
-    p += sqlite4PutVarint64(aHdrBuf + p, (u64)(23 + 4*(i64)nBlob));
-    nHdrContent = p;
-  }
-
-  nHdrSizeVarint = sqlite4PutVarint64(aOut, (u64)nHdrContent);
-  nn = nHdrSizeVarint;
-  memcpy(aOut + nn, aHdrBuf, nHdrContent);
-  nn += nHdrContent;
-
-  /* Integer payload (big-endian) */
-  {
-    int k = nIntBytes;
-    i64 v = nRowid;
-    aOut[nn + (--k)] = v & 0xff;
-    while( k ){
-      v >>= 8;
-      aOut[nn + (--k)] = v & 0xff;
-    }
-    nn += nIntBytes;
-  }
-
-  memcpy(aOut + nn, pBlob, nBlob);
-  nn += nBlob;
-  return nn;
-}
-
-int blobSpotCreate(const DiskAnnIndex *pIndex, BlobSpot **ppBlobSpot,
-                   u64 nRowid, int nBufferSize, int isWritable) {
+int blobSpotCreate(const DiskAnnIndex *pIndex, BlobSpot **ppBlobSpot, u64 nRowid, int nBufferSize, int isWritable) {
+  int rc = SQLITE_OK;
   BlobSpot *pBlobSpot;
   u8 *pBuffer;
-  sqlite4_env *pEnv = pIndex->db->pEnv;
 
   DiskAnnTrace(("blob spot created: rowid=%lld, isWritable=%d\n", nRowid, isWritable));
   assert( nBufferSize > 0 );
 
-  pBlobSpot = sqlite4_malloc(pEnv, sizeof(BlobSpot));
+  pBlobSpot = sqlite3_malloc(sizeof(BlobSpot));
   if( pBlobSpot == NULL ){
-    return SQLITE4_NOMEM;
+    rc = SQLITE_NOMEM_BKPT;
+    goto out;
   }
 
-  pBuffer = sqlite4_malloc(pEnv, nBufferSize);
+  pBuffer = sqlite3_malloc(nBufferSize);
   if( pBuffer == NULL ){
-    sqlite4_free(pEnv, pBlobSpot);
-    return SQLITE4_NOMEM;
+    rc = SQLITE_NOMEM_BKPT;
+    goto out;
   }
 
+  // open blob in the end so we don't need to close it in error case
+  rc = sqlite3_blob_open(pIndex->db, pIndex->zDbSName, pIndex->zShadow, "data", nRowid, isWritable, &pBlobSpot->pBlob);
+  rc = blobSpotConvertRc(pIndex, rc);
+  if( rc != SQLITE_OK ){
+    goto out;
+  }
   pBlobSpot->nRowid = nRowid;
   pBlobSpot->pBuffer = pBuffer;
   pBlobSpot->nBufferSize = nBufferSize;
@@ -370,147 +283,130 @@ int blobSpotCreate(const DiskAnnIndex *pIndex, BlobSpot **ppBlobSpot,
   pBlobSpot->isAborted = 0;
 
   *ppBlobSpot = pBlobSpot;
-  return SQLITE4_OK;
+  return SQLITE_OK;
+
+out:
+  if( pBlobSpot != NULL ){
+    sqlite3_free(pBlobSpot);
+  }
+  if( pBuffer != NULL ){
+    sqlite3_free(pBuffer);
+  }
+  return rc;
 }
 
-int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot,
-                   u64 nRowid, int nBufferSize) {
+int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, int nBufferSize) {
   int rc;
-  u8 aKey[32];
-  int nKey;
-  const KVByteArray *pData;
-  KVSize nData;
+  struct timespec _br0, _br1, _bo0, _bo1, _bro0, _bro1, _bc0, _bc1;
+  int doTiming = diskAnnIoTimingEnabled();
+  int hit0 = 0, hit1 = 0, hitHi = 0;
+  int miss0 = 0, miss1 = 0, missHi = 0;
 
   DiskAnnTrace(("blob spot reload: rowid=%lld\n", nRowid));
-  assert( pBlobSpot != NULL );
+  assert( pBlobSpot != NULL && (pBlobSpot->pBlob != NULL || pBlobSpot->isAborted ) );
   assert( pBlobSpot->nBufferSize == nBufferSize );
 
   if( pBlobSpot->nRowid == nRowid && pBlobSpot->isInitialized ){
-    return SQLITE4_OK;
+    return SQLITE_OK;
   }
 
+  if( doTiming ){
+    clock_gettime(CLOCK_MONOTONIC, &_br0);
+    sqlite3_db_status(pIndex->db, SQLITE_DBSTATUS_CACHE_HIT, &hit0, &hitHi, 0);
+    sqlite3_db_status(pIndex->db, SQLITE_DBSTATUS_CACHE_MISS, &miss0, &missHi, 0);
+  }
+
+  // if last blob open/reopen operation aborted - we need to close current blob and open new one
+  // (as all operations over aborted blob will return SQLITE_ABORT error)
   if( pBlobSpot->isAborted ){
+    if( pBlobSpot->pBlob != NULL ){
+      sqlite3_blob_close(pBlobSpot->pBlob);
+    }
+    pBlobSpot->pBlob = NULL;
+    pBlobSpot->isInitialized = 0;
     pBlobSpot->isAborted = 0;
+    pBlobSpot->nRowid = nRowid;
+
+    if( doTiming ) clock_gettime(CLOCK_MONOTONIC, &_bo0);
+    rc = sqlite3_blob_open(pIndex->db, pIndex->zDbSName, pIndex->zShadow, "data", nRowid, pBlobSpot->isWritable, &pBlobSpot->pBlob);
+    if( doTiming ){
+      clock_gettime(CLOCK_MONOTONIC, &_bo1);
+      g_totalBlobOpenMs += diskAnnMsBetween(&_bo0, &_bo1);
+    }
+    rc = blobSpotConvertRc(pIndex, rc);
+    if( rc != SQLITE_OK ){
+      goto abort;
+    }
+  }
+
+  if( pBlobSpot->nRowid != nRowid ){
+    if( doTiming ) clock_gettime(CLOCK_MONOTONIC, &_bro0);
+    rc = sqlite3_blob_reopen(pBlobSpot->pBlob, nRowid);
+    if( doTiming ){
+      clock_gettime(CLOCK_MONOTONIC, &_bro1);
+      g_totalBlobReopenMs += diskAnnMsBetween(&_bro0, &_bro1);
+    }
+    rc = blobSpotConvertRc(pIndex, rc);
+    if( rc != SQLITE_OK ){
+      goto abort;
+    }
+    pBlobSpot->nRowid = nRowid;
     pBlobSpot->isInitialized = 0;
   }
+  if( doTiming ) clock_gettime(CLOCK_MONOTONIC, &_bc0);
+  rc = sqlite3_blob_read(pBlobSpot->pBlob, pBlobSpot->pBuffer, nBufferSize, 0);
+  if( doTiming ){
+    clock_gettime(CLOCK_MONOTONIC, &_bc1);
+    g_totalBlobReadCallMs += diskAnnMsBetween(&_bc0, &_bc1);
+  }
+  if( rc != SQLITE_OK ){
+    goto abort;
+  }
 
-  pBlobSpot->nRowid = nRowid;
-  pBlobSpot->isInitialized = 0;
-
-  nKey = blobSpotBuildKey(pIndex, (i64)nRowid, aKey);
-
-  {
-    struct timespec _kvr0, _kvr1, _ko0, _ko1, _ks0, _ks1, _kd0, _kd1;
-    struct timespec _kdec0, _kdec1, _km0, _km1;
-    int doTiming = diskAnnIoTimingEnabled();
-    if( doTiming ) clock_gettime(CLOCK_MONOTONIC, &_kvr0);
-
-    /* Lazily open persistent read cursor on first use */
-    if( pIndex->pReadCsr == NULL ){
-      if( doTiming ) clock_gettime(CLOCK_MONOTONIC, &_ko0);
-      rc = sqlite4KVStoreOpenCursor(pIndex->db->aDb[0].pKV, &pIndex->pReadCsr);
-      if( doTiming ){
-        clock_gettime(CLOCK_MONOTONIC, &_ko1);
-        g_totalKvCursorOpenMs += diskAnnMsBetween(&_ko0, &_ko1);
-      }
-      if( rc != SQLITE4_OK ) goto abort;
-    }
-
-    if( doTiming ) clock_gettime(CLOCK_MONOTONIC, &_ks0);
-    rc = sqlite4KVCursorSeek(pIndex->pReadCsr, aKey, nKey, 0);
-    if( doTiming ){
-      clock_gettime(CLOCK_MONOTONIC, &_ks1);
-      g_totalKvSeekMs += diskAnnMsBetween(&_ks0, &_ks1);
-    }
-    if( rc == SQLITE4_NOTFOUND || rc == SQLITE4_INEXACT ){
-      return DISKANN_ROW_NOT_FOUND;
-    }
-    if( rc != SQLITE4_OK ) goto abort;
-
-    if( doTiming ) clock_gettime(CLOCK_MONOTONIC, &_kd0);
-    rc = sqlite4KVCursorData(pIndex->pReadCsr, 0, -1, &pData, &nData);
-    if( doTiming ){
-      clock_gettime(CLOCK_MONOTONIC, &_kd1);
-      g_totalKvDataMs += diskAnnMsBetween(&_kd0, &_kd1);
-    }
-    if( rc != SQLITE4_OK ) goto abort;
-
-    {
-      int nBlob = 0;
-      if( doTiming ) clock_gettime(CLOCK_MONOTONIC, &_kdec0);
-      const u8 *pBlob = blobSpotDecodeRecord((const u8*)pData, (int)nData, &nBlob);
-      if( doTiming ){
-        clock_gettime(CLOCK_MONOTONIC, &_kdec1);
-        g_totalKvDecodeMs += diskAnnMsBetween(&_kdec0, &_kdec1);
-      }
-      if( pBlob == NULL || nBlob < nBufferSize ){
-        rc = SQLITE4_ERROR;
-        goto abort;
-      }
-      if( doTiming ) clock_gettime(CLOCK_MONOTONIC, &_km0);
-      memcpy(pBlobSpot->pBuffer, pBlob, nBufferSize);
-      if( doTiming ){
-        clock_gettime(CLOCK_MONOTONIC, &_km1);
-        g_totalKvMemcpyMs += diskAnnMsBetween(&_km0, &_km1);
-      }
-    }
-
-    if( doTiming ){
-      clock_gettime(CLOCK_MONOTONIC, &_kvr1);
-      g_totalKvReadMs += (_kvr1.tv_sec - _kvr0.tv_sec)*1000.0
-                       + (_kvr1.tv_nsec - _kvr0.tv_nsec)/1e6;
-    }
+  if( doTiming ){
+    clock_gettime(CLOCK_MONOTONIC, &_br1);
+    sqlite3_db_status(pIndex->db, SQLITE_DBSTATUS_CACHE_HIT, &hit1, &hitHi, 0);
+    sqlite3_db_status(pIndex->db, SQLITE_DBSTATUS_CACHE_MISS, &miss1, &missHi, 0);
+    g_totalBlobReadMs += diskAnnMsBetween(&_br0, &_br1);
+    g_totalBlobCacheHits += hit1 - hit0;
+    g_totalBlobCacheMisses += miss1 - miss0;
   }
 
   pIndex->nReads++;
   pBlobSpot->isInitialized = 1;
-  return SQLITE4_OK;
+  return SQLITE_OK;
 
 abort:
   pBlobSpot->isAborted = 1;
   pBlobSpot->isInitialized = 0;
-  return (rc == SQLITE4_OK) ? SQLITE4_ERROR : rc;
+  return rc;
 }
 
-int blobSpotFlush(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot) {
+int blobSpotFlush(DiskAnnIndex* pIndex, BlobSpot *pBlobSpot) {
   int rc;
-  u8 aKey[32];
-  int nKey;
-  u8 *aRec;
-  int nRec;
-  sqlite4_env *pEnv = pIndex->db->pEnv;
-  struct timespec _kvw0, _kvw1;
-
-  nKey = blobSpotBuildKey(pIndex, (i64)pBlobSpot->nRowid, aKey);
-
-  aRec = sqlite4_malloc(pEnv, pBlobSpot->nBufferSize + 40);
-  if( aRec == NULL ) return SQLITE4_NOMEM;
-
-  nRec = blobSpotEncodeRecord((i64)pBlobSpot->nRowid, pBlobSpot->pBuffer,
-                              pBlobSpot->nBufferSize, aRec);
-
-  if( diskAnnIoTimingEnabled() ) clock_gettime(CLOCK_MONOTONIC, &_kvw0);
-  rc = sqlite4KVStoreReplace(pIndex->db->aDb[0].pKV, aKey, nKey, aRec, nRec);
+  struct timespec _bw0, _bw1;
+  if( diskAnnIoTimingEnabled() ) clock_gettime(CLOCK_MONOTONIC, &_bw0);
+  rc = sqlite3_blob_write(pBlobSpot->pBlob, pBlobSpot->pBuffer, pBlobSpot->nBufferSize, 0);
   if( diskAnnIoTimingEnabled() ){
-    clock_gettime(CLOCK_MONOTONIC, &_kvw1);
-    g_totalKvWriteMs += (_kvw1.tv_sec - _kvw0.tv_sec)*1000.0
-                      + (_kvw1.tv_nsec - _kvw0.tv_nsec)/1e6;
+    clock_gettime(CLOCK_MONOTONIC, &_bw1);
+    g_totalBlobWriteMs += (_bw1.tv_sec - _bw0.tv_sec)*1000.0
+                        + (_bw1.tv_nsec - _bw0.tv_nsec)/1e6;
   }
-
-  sqlite4_free(pEnv, aRec);
-
-  if( rc != SQLITE4_OK ) return rc;
+  if( rc != SQLITE_OK ){
+    return rc;
+  }
   pIndex->nWrites++;
-  return SQLITE4_OK;
+  return rc;
 }
 
 void blobSpotFree(BlobSpot *pBlobSpot) {
-  sqlite4_env *pEnv = sqlite4_env_default();
-  if( pBlobSpot == NULL ) return;
-  if( pBlobSpot->pBuffer != NULL ){
-    sqlite4_free(pEnv, pBlobSpot->pBuffer);
+  if( pBlobSpot->pBlob != NULL ){
+    sqlite3_blob_close(pBlobSpot->pBlob);
   }
-  sqlite4_free(pEnv, pBlobSpot);
+  if( pBlobSpot->pBuffer != NULL ){
+    sqlite3_free(pBlobSpot->pBuffer);
+  }
+  sqlite3_free(pBlobSpot);
 }
 
 /**************************************************************************
@@ -547,7 +443,7 @@ int nodeEdgesMetadataOffset(const DiskAnnIndex *pIndex){
   unsigned int offset;
   unsigned int nMaxEdges = nodeEdgesMaxCount(pIndex);
   offset = nodeMetadataSize(pIndex->nFormatVersion) + pIndex->nNodeVectorSize + nMaxEdges * pIndex->nEdgeVectorSize;
-  assert( offset <= (unsigned int)pIndex->nBlockSize );
+  assert( offset <= pIndex->nBlockSize );
   return offset;
 }
 
@@ -556,7 +452,7 @@ void nodeBinInit(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, Ve
 
   memset(pBlobSpot->pBuffer, 0, pBlobSpot->nBufferSize);
   writeLE64(pBlobSpot->pBuffer, nRowid);
-  /* neighbours count already zero after memset */
+  // neighbours count already zero after memset - no need to set it explicitly
 
   vectorSerializeToBlob(pVector, pBlobSpot->pBuffer + nodeMetadataSize(pIndex->nFormatVersion), pIndex->nNodeVectorSize);
 }
@@ -598,6 +494,7 @@ void nodeBinEdge(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot, int iEdg
 
 int nodeBinEdgeFindIdx(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot, u64 nRowid) {
   int i, nEdges = nodeBinEdges(pIndex, pBlobSpot);
+  // todo: if edges will be sorted by identifiers we can use binary search here (although speed up will be visible only on pretty loaded nodes: >128 edges)
   for(i = 0; i < nEdges; i++){
     u64 edgeId;
     nodeBinEdge(pIndex, pBlobSpot, i, &edgeId, NULL, NULL);
@@ -614,11 +511,11 @@ void nodeBinPruneEdges(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int nPru
   writeLE16(pBlobSpot->pBuffer + sizeof(u64), nPruned);
 }
 
-/* replace edge at position iReplace or add new one if iReplace == nEdges */
+// replace edge at position iReplace or add new one if iReplace == nEdges
 void nodeBinReplaceEdge(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int iReplace, u64 nRowid, float distance, Vector *pVector) {
   int nMaxEdges = nodeEdgesMaxCount(pIndex);
   int nEdges = nodeBinEdges(pIndex, pBlobSpot);
-  int edgeVectorOffset, edgeMetaOffset;
+  int edgeVectorOffset, edgeMetaOffset, itemsToMove;
 
   assert( 0 <= iReplace && iReplace < nMaxEdges );
   assert( 0 <= iReplace && iReplace <= nEdges );
@@ -640,7 +537,7 @@ void nodeBinReplaceEdge(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int iRe
   writeLE16(pBlobSpot->pBuffer + sizeof(u64), nEdges);
 }
 
-/* delete edge at position iDelete by swapping it with the last edge */
+// delete edge at position iDelete by swapping it with the last edge
 void nodeBinDeleteEdge(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int iDelete) {
   int nEdges = nodeBinEdges(pIndex, pBlobSpot);
   int edgeVectorOffset, edgeMetaOffset, lastVectorOffset, lastMetaOffset;
@@ -666,7 +563,7 @@ void nodeBinDeleteEdge(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int iDel
 }
 
 void nodeBinDebug(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot) {
-#if defined(SQLITE4_DEBUG) && defined(SQLITE4_VECTOR_TRACE)
+#if defined(SQLITE_DEBUG) && defined(SQLITE_VECTOR_TRACE)
   int nEdges, nMaxEdges, i;
   u64 nRowid;
   float distance = 0;
@@ -688,11 +585,11 @@ void nodeBinDebug(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot) {
 }
 
 /*******************************************************************************
-** DiskANN shadow index operations
+** DiskANN shadow index operations (some of them exposed as DiskANN internal API)
 ********************************************************************************/
 
 int diskAnnCreateIndex(
-  sqlite4 *db,
+  sqlite3 *db,
   const char *zDbSName,
   const char *zIdxName,
   const VectorIdxKey *pKey,
@@ -703,26 +600,25 @@ int diskAnnCreateIndex(
   int type, dims, metric, neighbours;
   u64 maxNeighborsParam, blockSizeBytes;
   char *zSql;
-  /* Render column defs and names - for rowid-like case only "index_key INTEGER" */
-  char columnSqlDefs[VECTOR_INDEX_SQL_RENDER_LIMIT];
-  char columnSqlNames[VECTOR_INDEX_SQL_RENDER_LIMIT];
-
+  const char *zRowidColumnName;
+  char columnSqlDefs[VECTOR_INDEX_SQL_RENDER_LIMIT]; // definition of columns (e.g. index_key INTEGER BINARY, index_key1 TEXT, ...)
+  char columnSqlNames[VECTOR_INDEX_SQL_RENDER_LIMIT]; // just column names (e.g. index_key, index_key1, index_key2, ...)
   if( vectorIdxKeyDefsRender(pKey, "index_key", columnSqlDefs, sizeof(columnSqlDefs)) != 0 ){
-    return SQLITE4_ERROR;
+    return SQLITE_ERROR;
   }
   if( vectorIdxKeyNamesRender(pKey->nKeyColumns, "index_key", columnSqlNames, sizeof(columnSqlNames)) != 0 ){
-    return SQLITE4_ERROR;
+    return SQLITE_ERROR;
   }
   if( vectorIdxParamsPutU64(pParams, VECTOR_INDEX_TYPE_PARAM_ID, VECTOR_INDEX_TYPE_DISKANN) != 0 ){
-    return SQLITE4_ERROR;
+    return SQLITE_ERROR;
   }
   type = vectorIdxParamsGetU64(pParams, VECTOR_TYPE_PARAM_ID);
   if( type == 0 ){
-    return SQLITE4_ERROR;
+    return SQLITE_ERROR;
   }
   dims = vectorIdxParamsGetU64(pParams, VECTOR_DIM_PARAM_ID);
   if( dims == 0 ){
-    return SQLITE4_ERROR;
+    return SQLITE_ERROR;
   }
   assert( 0 < dims && dims <= MAX_VECTOR_SZ );
 
@@ -730,13 +626,13 @@ int diskAnnCreateIndex(
   if( metric == 0 ){
     metric = VECTOR_METRIC_TYPE_COS;
     if( vectorIdxParamsPutU64(pParams, VECTOR_METRIC_TYPE_PARAM_ID, metric) != 0 ){
-      return SQLITE4_ERROR;
+      return SQLITE_ERROR;
     }
   }
   neighbours = vectorIdxParamsGetU64(pParams, VECTOR_COMPRESS_NEIGHBORS_PARAM_ID);
   if( neighbours == VECTOR_TYPE_FLOAT1BIT && metric != VECTOR_METRIC_TYPE_COS ){
     *pzErrMsg = "1-bit compression available only for cosine metric";
-    return SQLITE4_ERROR;
+    return SQLITE_ERROR;
   }
   if( neighbours == 0 ){
     neighbours = type;
@@ -744,35 +640,39 @@ int diskAnnCreateIndex(
 
   maxNeighborsParam = vectorIdxParamsGetU64(pParams, VECTOR_MAX_NEIGHBORS_PARAM_ID);
   if( maxNeighborsParam == 0 ){
+    // 3 D**(1/2) gives good recall values (90%+)
+    // we also want to keep disk overhead at moderate level - 50x of the disk size increase is the current upper bound
     maxNeighborsParam = MIN(3 * ((int)(sqrt(dims)) + 1), (50 * nodeOverhead(VECTOR_FORMAT_DEFAULT, vectorDataSize(type, dims))) / nodeEdgeOverhead(VECTOR_FORMAT_DEFAULT, vectorDataSize(neighbours, dims)) + 1);
   }
   blockSizeBytes = nodeOverhead(VECTOR_FORMAT_DEFAULT, vectorDataSize(type, dims)) + maxNeighborsParam * (u64)nodeEdgeOverhead(VECTOR_FORMAT_DEFAULT, vectorDataSize(neighbours, dims));
   if( blockSizeBytes > DISKANN_MAX_BLOCK_SZ ){
-    return SQLITE4_ERROR;
+    return SQLITE_ERROR;
   }
-  if( vectorIdxParamsPutU64(pParams, VECTOR_BLOCK_SIZE_PARAM_ID, MAX(256, blockSizeBytes)) != 0 ){
-    return SQLITE4_ERROR;
+  if( vectorIdxParamsPutU64(pParams, VECTOR_BLOCK_SIZE_PARAM_ID, MAX(256, blockSizeBytes))  != 0 ){
+    return SQLITE_ERROR;
   }
 
   if( vectorIdxParamsGetF64(pParams, VECTOR_PRUNING_ALPHA_PARAM_ID) == 0 ){
     if( vectorIdxParamsPutF64(pParams, VECTOR_PRUNING_ALPHA_PARAM_ID, VECTOR_PRUNING_ALPHA_DEFAULT) != 0 ){
-      return SQLITE4_ERROR;
+      return SQLITE_ERROR;
     }
   }
   if( vectorIdxParamsGetU64(pParams, VECTOR_INSERT_L_PARAM_ID) == 0 ){
     if( vectorIdxParamsPutU64(pParams, VECTOR_INSERT_L_PARAM_ID, VECTOR_INSERT_L_DEFAULT) != 0 ){
-      return SQLITE4_ERROR;
+      return SQLITE_ERROR;
     }
   }
   if( vectorIdxParamsGetU64(pParams, VECTOR_SEARCH_L_PARAM_ID) == 0 ){
     if( vectorIdxParamsPutU64(pParams, VECTOR_SEARCH_L_PARAM_ID, VECTOR_SEARCH_L_DEFAULT) != 0 ){
-      return SQLITE4_ERROR;
+      return SQLITE_ERROR;
     }
   }
-
-  /* For rowid-like key: shadow table uses index_key as primary key */
+  // we want to preserve rowid - so it must be explicit in the schema
+  // also, we don't want to store redundant set of fields - so the strategy is like that:
+  // 1. If we have single PK with INTEGER affinity and BINARY collation we only need single PK of same type
+  // 2. In other case we need rowid PK and unique index over other fields
   if( vectorIdxKeyRowidLike(pKey) ){
-    zSql = sqlite4MPrintf(
+    zSql = sqlite3MPrintf(
         db,
         "CREATE TABLE IF NOT EXISTS \"%w\".%s_shadow (%s, data BLOB, PRIMARY KEY (%s))",
         zDbSName,
@@ -780,9 +680,9 @@ int diskAnnCreateIndex(
         columnSqlDefs,
         columnSqlNames
         );
+    zRowidColumnName = "index_key";
   }else{
-    /* Non-rowid-like keys: not officially supported in sqlite4 port, but create structure anyway */
-    zSql = sqlite4MPrintf(
+    zSql = sqlite3MPrintf(
         db,
         "CREATE TABLE IF NOT EXISTS \"%w\".%s_shadow (rowid INTEGER PRIMARY KEY, %s, data BLOB, UNIQUE (%s))",
         zDbSName,
@@ -790,252 +690,262 @@ int diskAnnCreateIndex(
         columnSqlDefs,
         columnSqlNames
         );
+    zRowidColumnName = "rowid";
   }
-  if( zSql == NULL ){
-    return SQLITE4_NOMEM;
-  }
-  rc = sqlite4_exec(db, zSql, 0, 0);
-  sqlite4DbFree(db, zSql);
-  if( rc != SQLITE4_OK ){
+  rc = sqlite3_exec(db, zSql, 0, 0, 0);
+  sqlite3DbFree(db, zSql);
+  if( rc != SQLITE_OK ){
     return rc;
   }
-
-  /* Create an index on index_key for efficient random row selection */
-  zSql = sqlite4MPrintf(
+  /*
+   * vector blobs are usually pretty huge (more than a page size, for example, node block for 1024d f32 embeddings with 1bit compression will occupy ~20KB)
+   * in this case, main table B-Tree takes on redundant shape where all leaf nodes has only 1 cell
+   *
+   * as we have a query which selects random row using OFFSET/LIMIT trick - we will need to read all these leaf nodes pages just to skip them
+   * so, in order to remove this overhead for random row selection - we creating an index with just single column used
+   * in this case B-Tree leafs will be full of rowids and the overhead for page reads will be very small
+  */
+  zSql = sqlite3MPrintf(
       db,
       "CREATE INDEX IF NOT EXISTS \"%w\".%s_shadow_idx ON %s_shadow (%s)",
       zDbSName,
       zIdxName,
       zIdxName,
-      columnSqlNames
+      zRowidColumnName
   );
-  if( zSql == NULL ){
-    return SQLITE4_NOMEM;
-  }
-  rc = sqlite4_exec(db, zSql, 0, 0);
-  sqlite4DbFree(db, zSql);
+  rc = sqlite3_exec(db, zSql, 0, 0, 0);
+  sqlite3DbFree(db, zSql);
   return rc;
 }
 
-int diskAnnClearIndex(sqlite4 *db, const char *zDbSName, const char *zIdxName) {
-  char *zSql = sqlite4MPrintf(db, "DELETE FROM \"%w\".%s_shadow", zDbSName, zIdxName);
-  int rc;
-  if( zSql == NULL ) return SQLITE4_NOMEM;
-  rc = sqlite4_exec(db, zSql, 0, 0);
-  sqlite4DbFree(db, zSql);
+int diskAnnClearIndex(sqlite3 *db, const char *zDbSName, const char *zIdxName) {
+  char *zSql = sqlite3MPrintf(db, "DELETE FROM \"%w\".%s_shadow", zDbSName, zIdxName);
+  int rc = sqlite3_exec(db, zSql, 0, 0, 0);
+  sqlite3DbFree(db, zSql);
   return rc;
 }
 
-int diskAnnDropIndex(sqlite4 *db, const char *zDbSName, const char *zIdxName){
-  char *zSql = sqlite4MPrintf(db, "DROP TABLE IF EXISTS \"%w\".%s_shadow", zDbSName, zIdxName);
-  int rc;
-  if( zSql == NULL ) return SQLITE4_NOMEM;
-  rc = sqlite4_exec(db, zSql, 0, 0);
-  sqlite4DbFree(db, zSql);
+int diskAnnDropIndex(sqlite3 *db, const char *zDbSName, const char *zIdxName){
+  char *zSql = sqlite3MPrintf(db, "DROP TABLE \"%w\".%s_shadow", zDbSName, zIdxName);
+  int rc = sqlite3_exec(db, zSql, 0, 0, 0);
+  sqlite3DbFree(db, zSql);
   return rc;
 }
 
 /*
- * Select random row from the shadow table using direct KV access.
- * Seeks to the shadow table's key prefix and picks the first row found.
- * Returns SQLITE4_DONE if no row found (table is empty).
+ * Select random row from the shadow table and set its rowid to pRowid.
 */
 static int diskAnnSelectRandomShadowRow(DiskAnnIndex *pIndex, u64 *pRowid){
   int rc;
-  KVCursor *pCsr = NULL;
-  const KVByteArray *pKey;
-  KVSize nKey;
+  sqlite3_stmt *pStmt = NULL;
+  char *zSql = NULL;
 
-  if( pIndex->nShadowRows <= 0 ){
-    /* No rows known yet — try seeking to first row to check if table is empty */
-    rc = sqlite4KVStoreOpenCursor(pIndex->db->aDb[0].pKV, &pCsr);
-    if( rc != SQLITE4_OK ) return rc;
-
-    rc = sqlite4KVCursorSeek(pCsr, pIndex->aKeyPrefix, pIndex->nKeyPrefix, 1);
-    if( rc == SQLITE4_NOTFOUND ){
-      sqlite4KVCursorClose(pCsr);
-      return SQLITE4_DONE;
-    }
-    if( rc != SQLITE4_OK && rc != SQLITE4_INEXACT ){
-      sqlite4KVCursorClose(pCsr);
-      return rc;
-    }
-
-    rc = sqlite4KVCursorKey(pCsr, &pKey, &nKey);
-    if( rc != SQLITE4_OK ){
-      sqlite4KVCursorClose(pCsr);
-      return rc;
-    }
-    if( nKey <= pIndex->nKeyPrefix ||
-        memcmp(pKey, pIndex->aKeyPrefix, pIndex->nKeyPrefix) != 0 ){
-      sqlite4KVCursorClose(pCsr);
-      return SQLITE4_DONE;
-    }
-
-    /* Decode the first rowid as fallback */
-    {
-      sqlite4_num num;
-      int decRc = sqlite4VdbeDecodeNumericKey(
-          pKey + pIndex->nKeyPrefix,
-          nKey - pIndex->nKeyPrefix,
-          &num);
-      if( decRc <= 0 ){
-        sqlite4KVCursorClose(pCsr);
-        return SQLITE4_ERROR;
-      }
-      *pRowid = (u64)sqlite4_num_to_int64(num, 0);
-    }
-    sqlite4KVCursorClose(pCsr);
-    return SQLITE4_OK;
+  zSql = sqlite3MPrintf(
+    pIndex->db,
+    "SELECT rowid FROM \"%w\".%s LIMIT 1 "
+    "OFFSET ABS(RANDOM()) %% MAX((SELECT COUNT(*) FROM \"%w\".%s), 1)",
+    pIndex->zDbSName, pIndex->zShadow,
+    pIndex->zDbSName, pIndex->zShadow
+  );
+  if( zSql == NULL ){
+    rc = SQLITE_NOMEM_BKPT;
+    goto out;
+  }
+  rc = sqlite3_prepare_v2(pIndex->db, zSql, -1, &pStmt, 0);
+  if( rc != SQLITE_OK ){
+    goto out;
+  }
+  rc = sqlite3_step(pStmt);
+  if( rc != SQLITE_ROW ){
+    goto out;
   }
 
-  /* Pick a random rowid in [1, nShadowRows] and seek to nearest existing row */
-  {
-    u64 randVal;
-    u8 aKey[32];
-    int nKey2;
-    i64 targetRowid;
+  assert( sqlite3_column_type(pStmt, 0) == SQLITE_INTEGER );
+  *pRowid = sqlite3_column_int64(pStmt, 0);
+  assert( sqlite3_step(pStmt) == SQLITE_DONE );
+  rc = SQLITE_OK;
 
-    sqlite4_randomness(pIndex->db->pEnv, sizeof(randVal), &randVal);
-    targetRowid = (i64)(randVal % (u64)pIndex->nShadowRows) + 1;
-
-    nKey2 = blobSpotBuildKey(pIndex, targetRowid, aKey);
-
-    rc = sqlite4KVStoreOpenCursor(pIndex->db->aDb[0].pKV, &pCsr);
-    if( rc != SQLITE4_OK ) return rc;
-
-    /* Seek to nearest key >= target (dir=1) */
-    rc = sqlite4KVCursorSeek(pCsr, aKey, nKey2, 1);
-    if( rc == SQLITE4_NOTFOUND ){
-      /* Overshot past end — wrap to first row */
-      rc = sqlite4KVCursorSeek(pCsr, pIndex->aKeyPrefix, pIndex->nKeyPrefix, 1);
-    }
-    if( rc != SQLITE4_OK && rc != SQLITE4_INEXACT ){
-      sqlite4KVCursorClose(pCsr);
-      return rc;
-    }
-
-    rc = sqlite4KVCursorKey(pCsr, &pKey, &nKey);
-    if( rc != SQLITE4_OK ){
-      sqlite4KVCursorClose(pCsr);
-      return rc;
-    }
-
-    /* Verify it belongs to this shadow table */
-    if( nKey <= pIndex->nKeyPrefix ||
-        memcmp(pKey, pIndex->aKeyPrefix, pIndex->nKeyPrefix) != 0 ){
-      /* Wrapped past shadow table — seek back to first row */
-      rc = sqlite4KVCursorSeek(pCsr, pIndex->aKeyPrefix, pIndex->nKeyPrefix, 1);
-      if( rc == SQLITE4_NOTFOUND ){
-        sqlite4KVCursorClose(pCsr);
-        return SQLITE4_DONE;
-      }
-      if( rc != SQLITE4_OK && rc != SQLITE4_INEXACT ){
-        sqlite4KVCursorClose(pCsr);
-        return rc;
-      }
-      rc = sqlite4KVCursorKey(pCsr, &pKey, &nKey);
-      if( rc != SQLITE4_OK ){
-        sqlite4KVCursorClose(pCsr);
-        return rc;
-      }
-    }
-
-    /* Decode the rowid */
-    {
-      sqlite4_num num;
-      int decRc = sqlite4VdbeDecodeNumericKey(
-          pKey + pIndex->nKeyPrefix,
-          nKey - pIndex->nKeyPrefix,
-          &num);
-      if( decRc <= 0 ){
-        sqlite4KVCursorClose(pCsr);
-        return SQLITE4_ERROR;
-      }
-      *pRowid = (u64)sqlite4_num_to_int64(num, 0);
-    }
-
-    sqlite4KVCursorClose(pCsr);
-    return SQLITE4_OK;
+out:
+  if( pStmt != NULL ){
+    sqlite3_finalize(pStmt);
   }
+  if( zSql != NULL ){
+    sqlite3DbFree(pIndex->db, zSql);
+  }
+  return rc;
 }
 
 /*
  * Find row by keys from pInRow and set its rowid to pRowid
- * In sqlite4 port, only rowid-like keys are supported, so this uses index_key directly
+ * returns SQLITE_DONE if no row found (this will be used to determine case when table is empty)
 */
 static int diskAnnGetShadowRowid(const DiskAnnIndex *pIndex, const VectorInRow *pInRow, u64 *pRowid) {
-  /* For rowid-like keys, vectorInRowTryGetRowid always succeeds */
-  return vectorInRowTryGetRowid(pInRow, pRowid);
-}
-
-/*
- * Find row keys by rowid and put them in pRows structure
- * Only needed for non-rowid-like key case (not used in sqlite4 rowid-only port)
-*/
-static int diskAnnGetShadowRowKeys(const DiskAnnIndex *pIndex, u64 nRowid, const VectorIdxKey *pKey, VectorOutRows *pRows, int iRow) {
-  /* For rowid-like case, pRows->aIntValues is non-NULL and this function should not be called */
-  assert( 0 );
-  return SQLITE4_ERROR;
-}
-
-/*
- * Insert new empty row to the shadow table
- * For rowid-like keys: INSERT INTO shadow(index_key, data) VALUES (nRowid, zeroblob)
-*/
-static int diskAnnInsertShadowRow(const DiskAnnIndex *pIndex, const VectorInRow *pVectorInRow, u64 *pRowid){
-  static int s_shadowInsertCount = 0;
-  int rc;
-  sqlite4_stmt *pStmt = NULL;
+  int rc, i;
+  sqlite3_stmt *pStmt = NULL;
   char *zSql = NULL;
-  u8 *pZero = NULL;
-  sqlite4_env *pEnv = pIndex->db->pEnv;
-  s_shadowInsertCount++;
-  *pRowid = pVectorInRow->nRowid;
 
-  zSql = sqlite4MPrintf(
+  char columnSqlNames[VECTOR_INDEX_SQL_RENDER_LIMIT]; // just column names (e.g. index_key, index_key1, index_key2, ...)
+  char columnSqlPlaceholders[VECTOR_INDEX_SQL_RENDER_LIMIT]; // just placeholders (e.g. ?,?,?, ...)
+  if( vectorIdxKeyNamesRender(pInRow->nKeys, "index_key", columnSqlNames, sizeof(columnSqlNames)) != 0 ){
+    rc = SQLITE_ERROR;
+    goto out;
+  }
+  if( vectorInRowPlaceholderRender(pInRow, columnSqlPlaceholders, sizeof(columnSqlPlaceholders)) != 0 ){
+    rc = SQLITE_ERROR;
+    goto out;
+  }
+  zSql = sqlite3MPrintf(
       pIndex->db,
-      "INSERT INTO \"%w\".%s(index_key, data) VALUES (?, ?)",
-      pIndex->zDbSName, pIndex->zShadow
+      "SELECT rowid FROM \"%w\".%s WHERE (%s) = (%s)",
+      pIndex->zDbSName, pIndex->zShadow, columnSqlNames, columnSqlPlaceholders
   );
   if( zSql == NULL ){
-    rc = SQLITE4_NOMEM;
+    rc = SQLITE_NOMEM;
     goto out;
   }
-  rc = sqlite4_prepare(pIndex->db, zSql, -1, &pStmt, NULL);
-  sqlite4DbFree(pIndex->db, zSql);
-  zSql = NULL;
-  if( rc != SQLITE4_OK ){
+  rc = sqlite3_prepare_v2(pIndex->db, zSql, -1, &pStmt, 0);
+  if( rc != SQLITE_OK ){
     goto out;
   }
-
-  rc = sqlite4_bind_int64(pStmt, 1, (i64)pVectorInRow->nRowid);
-  if( rc != SQLITE4_OK ){
-    goto out;
+  for(i = 0; i < pInRow->nKeys; i++){
+    rc = sqlite3_bind_value(pStmt, i + 1, vectorInRowKey(pInRow, i));
+    if( rc != SQLITE_OK ){
+      goto out;
+    }
   }
-
-  pZero = sqlite4_malloc(pEnv, pIndex->nBlockSize);
-  if( pZero == NULL ){
-    rc = SQLITE4_NOMEM;
-    goto out;
-  }
-  memset(pZero, 0, pIndex->nBlockSize);
-  rc = sqlite4_bind_blob(pStmt, 2, pZero, pIndex->nBlockSize, SQLITE4_TRANSIENT, 0);
-  sqlite4_free(pEnv, pZero);
-  pZero = NULL;
-  if( rc != SQLITE4_OK ){
+  rc = sqlite3_step(pStmt);
+  if( rc != SQLITE_ROW ){
     goto out;
   }
 
-  rc = sqlite4_step(pStmt);
-  if( rc != SQLITE4_DONE ){
-    rc = SQLITE4_ERROR;
-    goto out;
-  }
-  rc = SQLITE4_OK;
+  assert( sqlite3_column_type(pStmt, 0) == SQLITE_INTEGER );
+  *pRowid = sqlite3_column_int64(pStmt, 0);
+
+  // check that we has only single row matching the criteria (otherwise - this is a bug)
+  assert( sqlite3_step(pStmt) == SQLITE_DONE );
+  rc = SQLITE_OK;
 out:
   if( pStmt != NULL ){
-    sqlite4_finalize(pStmt);
+    sqlite3_finalize(pStmt);
+  }
+  if( zSql != NULL ){
+    sqlite3DbFree(pIndex->db, zSql);
+  }
+  return rc;
+}
+
+/*
+ * Find row keys by rowid and put them in right into pRows structure
+*/
+static int diskAnnGetShadowRowKeys(const DiskAnnIndex *pIndex, u64 nRowid, const VectorIdxKey *pKey, VectorOutRows *pRows, int iRow) {
+  int rc, i;
+  sqlite3_stmt *pStmt = NULL;
+  char *zSql = NULL;
+
+  char columnSqlNames[VECTOR_INDEX_SQL_RENDER_LIMIT]; // just column names (e.g. index_key, index_key1, index_key2, ...)
+  if( vectorIdxKeyNamesRender(pKey->nKeyColumns, "index_key", columnSqlNames, sizeof(columnSqlNames)) != 0 ){
+    rc = SQLITE_ERROR;
+    goto out;
+  }
+  zSql = sqlite3MPrintf(
+      pIndex->db,
+      "SELECT %s FROM \"%w\".%s WHERE rowid = ?",
+      columnSqlNames, pIndex->zDbSName, pIndex->zShadow
+  );
+  if( zSql == NULL ){
+    rc = SQLITE_NOMEM;
+    goto out;
+  }
+  rc = sqlite3_prepare_v2(pIndex->db, zSql, -1, &pStmt, 0);
+  if( rc != SQLITE_OK ){
+    goto out;
+  }
+  rc = sqlite3_bind_int64(pStmt, 1, nRowid);
+  if( rc != SQLITE_OK ){
+    goto out;
+  }
+  rc = sqlite3_step(pStmt);
+  if( rc != SQLITE_ROW ){
+    goto out;
+  }
+  for(i = 0; i < pRows->nCols; i++){
+    rc = vectorOutRowsPut(pRows, iRow, i, NULL, sqlite3_column_value(pStmt, i));
+    if( rc != SQLITE_OK ){
+      goto out;
+    }
+  }
+
+  // check that we has only single row matching the criteria (otherwise - this is a bug)
+  assert( sqlite3_step(pStmt) == SQLITE_DONE );
+  rc = SQLITE_OK;
+out:
+  if( pStmt != NULL ){
+    sqlite3_finalize(pStmt);
+  }
+  if( zSql != NULL ){
+    sqlite3DbFree(pIndex->db, zSql);
+  }
+  return rc;
+}
+
+/*
+ * Insert new empty row to the shadow table and set new rowid to the pRowid (data will be zeroe-filled blob of size pIndex->nBlockSize)
+*/
+static int diskAnnInsertShadowRow(DiskAnnIndex *pIndex, const VectorInRow *pVectorInRow, u64 *pRowid){
+  int rc, i;
+  sqlite3_stmt *pStmt = NULL;
+  char *zSql = NULL;
+
+  char columnSqlPlaceholders[VECTOR_INDEX_SQL_RENDER_LIMIT]; // just placeholders (e.g. ?,?,?, ...)
+  char columnSqlNames[VECTOR_INDEX_SQL_RENDER_LIMIT]; // just column names (e.g. index_key, index_key1, index_key2, ...)
+  if( vectorInRowPlaceholderRender(pVectorInRow, columnSqlPlaceholders, sizeof(columnSqlPlaceholders)) != 0 ){
+    rc = SQLITE_ERROR;
+    goto out;
+  }
+  if( vectorIdxKeyNamesRender(pVectorInRow->nKeys, "index_key", columnSqlNames, sizeof(columnSqlNames)) != 0 ){
+    return SQLITE_ERROR;
+  }
+  zSql = sqlite3MPrintf(
+      pIndex->db,
+      "INSERT INTO \"%w\".%s(%s, data) VALUES (%s, ?) RETURNING rowid",
+      pIndex->zDbSName, pIndex->zShadow, columnSqlNames, columnSqlPlaceholders
+  );
+  if( zSql == NULL ){
+    rc = SQLITE_NOMEM_BKPT;
+    goto out;
+  }
+  rc = sqlite3_prepare_v2(pIndex->db, zSql, -1, &pStmt, 0);
+  if( rc != SQLITE_OK ){
+    goto out;
+  }
+  for(i = 0; i < pVectorInRow->nKeys; i++){
+    rc = sqlite3_bind_value(pStmt, i + 1, vectorInRowKey(pVectorInRow, i));
+    if( rc != SQLITE_OK ){
+      goto out;
+    }
+  }
+  rc = sqlite3_bind_zeroblob(pStmt, pVectorInRow->nKeys + 1, pIndex->nBlockSize);
+  if( rc != SQLITE_OK ){
+    goto out;
+  }
+  rc = sqlite3_step(pStmt);
+  if( rc != SQLITE_ROW ){
+    rc = SQLITE_ERROR;
+    goto out;
+  }
+
+  assert( sqlite3_column_type(pStmt, 0) == SQLITE_INTEGER );
+  *pRowid = sqlite3_column_int64(pStmt, 0);
+
+  // check that we has only single row matching the criteria (otherwise - this is a bug)
+  assert( sqlite3_step(pStmt) == SQLITE_DONE );
+  rc = SQLITE_OK;
+out:
+  if( pStmt != NULL ){
+    sqlite3_finalize(pStmt);
+  }
+  if( zSql != NULL ){
+    sqlite3DbFree(pIndex->db, zSql);
   }
   return rc;
 }
@@ -1043,37 +953,37 @@ out:
 /*
  * Delete row from the shadow table
 */
-static int diskAnnDeleteShadowRow(const DiskAnnIndex *pIndex, i64 nRowid){
+static int diskAnnDeleteShadowRow(DiskAnnIndex *pIndex, i64 nRowid){
   int rc;
-  sqlite4_stmt *pStmt = NULL;
-  char *zSql = sqlite4MPrintf(
+  sqlite3_stmt *pStmt = NULL;
+  char *zSql = sqlite3MPrintf(
       pIndex->db,
-      "DELETE FROM \"%w\".%s WHERE index_key = ?",
+      "DELETE FROM \"%w\".%s WHERE rowid = ?",
       pIndex->zDbSName, pIndex->zShadow
   );
   if( zSql == NULL ){
-    rc = SQLITE4_NOMEM;
+    rc = SQLITE_NOMEM_BKPT;
     goto out;
   }
-  rc = sqlite4_prepare(pIndex->db, zSql, -1, &pStmt, NULL);
-  sqlite4DbFree(pIndex->db, zSql);
-  zSql = NULL;
-  if( rc != SQLITE4_OK ){
+  rc = sqlite3_prepare_v2(pIndex->db, zSql, -1, &pStmt, 0);
+  if( rc != SQLITE_OK ){
     goto out;
   }
-  rc = sqlite4_bind_int64(pStmt, 1, nRowid);
-  if( rc != SQLITE4_OK ){
+  rc = sqlite3_bind_int64(pStmt, 1, nRowid);
+  if( rc != SQLITE_OK ){
     goto out;
   }
-  rc = sqlite4_step(pStmt);
-  if( rc != SQLITE4_DONE ){
-    rc = SQLITE4_ERROR;
+  rc = sqlite3_step(pStmt);
+  if( rc != SQLITE_DONE ){
     goto out;
   }
-  rc = SQLITE4_OK;
+  rc = SQLITE_OK;
 out:
   if( pStmt != NULL ){
-    sqlite4_finalize(pStmt);
+    sqlite3_finalize(pStmt);
+  }
+  if( zSql != NULL ){
+    sqlite3DbFree(pIndex->db, zSql);
   }
   return rc;
 }
@@ -1092,7 +1002,7 @@ int initVectorPair(int nodeType, int edgeType, int dims, VectorPair *pPair){
   }
   pPair->pEdge = vectorAlloc(edgeType, dims);
   if( pPair->pEdge == NULL ){
-    return SQLITE4_NOMEM;
+    return SQLITE_NOMEM_BKPT;
   }
   return 0;
 }
@@ -1114,7 +1024,7 @@ void deinitVectorPair(VectorPair *pPair) {
 
 int distanceBufferInsertIdx(const float *aDistances, int nSize, int nMaxSize, float distance){
   int i;
-#ifdef SQLITE4_DEBUG
+#ifdef SQLITE_DEBUG
   for(i = 0; i < nSize - 1; i++){
     assert(aDistances[i] <= aDistances[i + 1]);
   }
@@ -1159,8 +1069,6 @@ void bufferDelete(u8 *aBuffer, int nSize, int iDelete, int nItemSize) {
 ** DiskANN internals
 **************************************************************************/
 
-static int g_distTimingMode = 0;  /* 0=off, 1=query, 2=build */
-
 static float diskAnnVectorDistance(const DiskAnnIndex *pIndex, const Vector *pVec1, const Vector *pVec2){
   float result;
   struct timespec _d0, _d1;
@@ -1194,8 +1102,7 @@ static float diskAnnVectorDistance(const DiskAnnIndex *pIndex, const Vector *pVe
 }
 
 static DiskAnnNode *diskAnnNodeAlloc(const DiskAnnIndex *pIndex, u64 nRowid){
-  sqlite4_env *pEnv = pIndex->db->pEnv;
-  DiskAnnNode *pNode = sqlite4_malloc(pEnv, sizeof(DiskAnnNode));
+  DiskAnnNode *pNode = sqlite3_malloc(sizeof(DiskAnnNode));
   if( pNode == NULL ){
     return NULL;
   }
@@ -1210,24 +1117,21 @@ static void diskAnnNodeFree(DiskAnnNode *pNode){
   if( pNode->pBlobSpot != NULL ){
     blobSpotFree(pNode->pBlobSpot);
   }
-  /* Use env_default since we don't have a db reference here */
-  sqlite4_free(sqlite4_env_default(), pNode);
+  sqlite3_free(pNode);
 }
 
 static int diskAnnSearchCtxInit(const DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, const Vector* pQuery, int maxCandidates, int topCandidates, int blobMode){
-  sqlite4_env *pEnv = pIndex->db->pEnv;
-
   if( initVectorPair(pIndex->nNodeVectorType, pIndex->nEdgeVectorType, pIndex->nVectorDims, &pCtx->query) != 0 ){
-    return SQLITE4_NOMEM;
+    return SQLITE_NOMEM_BKPT;
   }
   loadVectorPair(&pCtx->query, pQuery);
 
-  pCtx->aDistances = sqlite4_malloc(pEnv, maxCandidates * sizeof(float));
-  pCtx->aCandidates = sqlite4_malloc(pEnv, maxCandidates * sizeof(DiskAnnNode*));
+  pCtx->aDistances = sqlite3_malloc(maxCandidates * sizeof(double));
+  pCtx->aCandidates = sqlite3_malloc(maxCandidates * sizeof(DiskAnnNode*));
   pCtx->nCandidates = 0;
   pCtx->maxCandidates = maxCandidates;
-  pCtx->aTopDistances = sqlite4_malloc(pEnv, topCandidates * sizeof(float));
-  pCtx->aTopCandidates = sqlite4_malloc(pEnv, topCandidates * sizeof(DiskAnnNode*));
+  pCtx->aTopDistances = sqlite3_malloc(topCandidates * sizeof(double));
+  pCtx->aTopCandidates = sqlite3_malloc(topCandidates * sizeof(DiskAnnNode*));
   pCtx->nTopCandidates = 0;
   pCtx->maxTopCandidates = topCandidates;
   pCtx->visitedList = NULL;
@@ -1235,22 +1139,31 @@ static int diskAnnSearchCtxInit(const DiskAnnIndex *pIndex, DiskAnnSearchCtx *pC
   pCtx->blobMode = blobMode;
 
   if( pCtx->aDistances != NULL && pCtx->aCandidates != NULL && pCtx->aTopDistances != NULL && pCtx->aTopCandidates != NULL ){
-    return SQLITE4_OK;
+    return SQLITE_OK;
   }
-  if( pCtx->aDistances != NULL ) sqlite4_free(pEnv, pCtx->aDistances);
-  if( pCtx->aCandidates != NULL ) sqlite4_free(pEnv, pCtx->aCandidates);
-  if( pCtx->aTopDistances != NULL ) sqlite4_free(pEnv, pCtx->aTopDistances);
-  if( pCtx->aTopCandidates != NULL ) sqlite4_free(pEnv, pCtx->aTopCandidates);
+  if( pCtx->aDistances != NULL ){
+    sqlite3_free(pCtx->aDistances);
+  }
+  if( pCtx->aCandidates != NULL ){
+    sqlite3_free(pCtx->aCandidates);
+  }
+  if( pCtx->aTopDistances != NULL ){
+    sqlite3_free(pCtx->aTopDistances);
+  }
+  if( pCtx->aTopCandidates != NULL ){
+    sqlite3_free(pCtx->aTopCandidates);
+  }
   deinitVectorPair(&pCtx->query);
-  return SQLITE4_NOMEM;
+  return SQLITE_NOMEM_BKPT;
 }
 
 static void diskAnnSearchCtxDeinit(DiskAnnSearchCtx *pCtx){
   int i;
   DiskAnnNode *pNode, *pNext;
-  sqlite4_env *pEnv = sqlite4_env_default();
 
-  for(i = 0; i < (int)pCtx->nCandidates; i++){
+  // usually, aCandidates array should contain only visited candidates (and they are duplicated in the visited list - so will be managed by code below)
+  // but in case of early return from error there can be unvisited candidates in the aCandidates array
+  for(i = 0; i < pCtx->nCandidates; i++){
     if( !pCtx->aCandidates[i]->visited ){
       diskAnnNodeFree(pCtx->aCandidates[i]);
     }
@@ -1262,13 +1175,15 @@ static void diskAnnSearchCtxDeinit(DiskAnnSearchCtx *pCtx){
     diskAnnNodeFree(pNode);
     pNode = pNext;
   }
-  sqlite4_free(pEnv, pCtx->aCandidates);
-  sqlite4_free(pEnv, pCtx->aDistances);
-  sqlite4_free(pEnv, pCtx->aTopCandidates);
-  sqlite4_free(pEnv, pCtx->aTopDistances);
+  sqlite3_free(pCtx->aCandidates);
+  sqlite3_free(pCtx->aDistances);
+  sqlite3_free(pCtx->aTopCandidates);
+  sqlite3_free(pCtx->aTopDistances);
   deinitVectorPair(&pCtx->query);
 }
 
+// check if we visited this node earlier
+// todo: we better to replace this linear check with something more efficient
 static int diskAnnSearchCtxIsVisited(const DiskAnnSearchCtx *pCtx, u64 nRowid){
   DiskAnnNode *pNode;
   for(pNode = pCtx->visitedList; pNode != NULL; pNode = pNode->pNext){
@@ -1279,9 +1194,11 @@ static int diskAnnSearchCtxIsVisited(const DiskAnnSearchCtx *pCtx, u64 nRowid){
   return 0;
 }
 
+// check if we already have candidate in the queue
+// todo: we better to replace this linear check with something more efficient
 static int diskAnnSearchCtxHasCandidate(const DiskAnnSearchCtx *pCtx, u64 nRowid){
   int i;
-  for(i = 0; i < (int)pCtx->nCandidates; i++){
+  for(i = 0; i < pCtx->nCandidates; i++){
     if( pCtx->aCandidates[i]->nRowid == nRowid ){
       return 1;
     }
@@ -1289,17 +1206,21 @@ static int diskAnnSearchCtxHasCandidate(const DiskAnnSearchCtx *pCtx, u64 nRowid
   return 0;
 }
 
+// return position of new candition or -1 if we should not add it to the quee
 static int diskAnnSearchCtxShouldAddCandidate(const DiskAnnIndex *pIndex, const DiskAnnSearchCtx *pCtx, float candidateDist){
   int i;
-  for(i = 0; i < (int)pCtx->nCandidates; i++){
+  // Find the index of the candidate that is further away from the query
+  // vector than the one we're inserting.
+  for(i = 0; i < pCtx->nCandidates; i++){
     float distCandidate = pCtx->aDistances[i];
     if( candidateDist < distCandidate ){
       return i;
     }
   }
-  return pCtx->nCandidates < pCtx->maxCandidates ? (int)pCtx->nCandidates : -1;
+  return pCtx->nCandidates < pCtx->maxCandidates ? pCtx->nCandidates : -1;
 }
 
+// mark node as visited and put it in the head of visitedList
 static void diskAnnSearchCtxMarkVisited(DiskAnnSearchCtx *pCtx, DiskAnnNode *pNode, float distance){
   int iInsert;
 
@@ -1326,7 +1247,7 @@ static int diskAnnSearchCtxHasUnvisited(const DiskAnnSearchCtx *pCtx){
 }
 
 static void diskAnnSearchCtxGetCandidate(DiskAnnSearchCtx *pCtx, int i, DiskAnnNode **ppNode, float *pDistance){
-  assert( 0 <= i && i < (int)pCtx->nCandidates );
+  assert( 0 <= i && i < pCtx->nCandidates );
   *ppNode = pCtx->aCandidates[i];
   *pDistance = pCtx->aDistances[i];
 }
@@ -1351,6 +1272,7 @@ static void diskAnnSearchCtxInsertCandidate(DiskAnnSearchCtx *pCtx, int iInsert,
   bufferInsert((u8*)pCtx->aDistances, pCtx->nCandidates, pCtx->maxCandidates, iInsert, sizeof(float), (u8*)&distance, NULL);
   pCtx->nCandidates = MIN(pCtx->nCandidates + 1, pCtx->maxCandidates);
   if( pLast != NULL && !pLast->visited ){
+    // since pLast is not visited it should have uninitialized pBlobSpot - so it's safe to completely free the node
     assert( pLast->pBlobSpot == NULL );
     pCtx->nUnvisited--;
     diskAnnNodeFree(pLast);
@@ -1358,14 +1280,16 @@ static void diskAnnSearchCtxInsertCandidate(DiskAnnSearchCtx *pCtx, int iInsert,
   pCtx->nUnvisited++;
 }
 
+// find closest candidate
+// we can return early as aCandidate array is sorted by the distance from the query
 static int diskAnnSearchCtxFindClosestCandidateIdx(const DiskAnnSearchCtx *pCtx){
   int i;
-#ifdef SQLITE4_DEBUG
-  for(i = 0; i < (int)pCtx->nCandidates - 1; i++){
+#ifdef SQLITE_DEBUG
+  for(i = 0; i < pCtx->nCandidates - 1; i++){
     assert(pCtx->aDistances[i] <= pCtx->aDistances[i + 1]);
   }
 #endif
-  for(i = 0; i < (int)pCtx->nCandidates; i++){
+  for(i = 0; i < pCtx->nCandidates; i++){
     DiskAnnNode *pCandidate = pCtx->aCandidates[i];
     if( pCandidate->visited ){
       continue;
@@ -1379,6 +1303,9 @@ static int diskAnnSearchCtxFindClosestCandidateIdx(const DiskAnnSearchCtx *pCtx)
 ** DiskANN core
 **************************************************************************/
 
+// return position for new edge(C) which will replace previous edge on that position or -1 if we should ignore it
+// we also check that no current edge(B) will "prune" new vertex: i.e. dist(B, C) >= (means worse than) alpha * dist(node, C) for all current edges
+// if any edge(B) will "prune" new edge(C) we will ignore it (return -1)
 static int diskAnnReplaceEdgeIdx(
   const DiskAnnIndex *pIndex,
   BlobSpot *pNodeBlob,
@@ -1389,13 +1316,14 @@ static int diskAnnReplaceEdgeIdx(
 ) {
   int i, nEdges, nMaxEdges, iReplace = -1;
   Vector nodeVector, edgeVector;
-  float nodeToNew, nodeToReplace = 0;
+  float nodeToNew, nodeToReplace;
 
   nEdges = nodeBinEdges(pIndex, pNodeBlob);
   nMaxEdges = nodeEdgesMaxCount(pIndex);
   nodeBinVector(pIndex, pNodeBlob, &nodeVector);
   loadVectorPair(pPlaceholder, &nodeVector);
 
+  // we need to evaluate potentially approximate distance here in order to correctly compare it with edge distances
   nodeToNew = diskAnnVectorDistance(pIndex, pPlaceholder->pEdge, pNewVector->pEdge);
   *pNodeToNew = nodeToNew;
 
@@ -1405,6 +1333,7 @@ static int diskAnnReplaceEdgeIdx(
 
     nodeBinEdge(pIndex, pNodeBlob, i, &edgeRowid, &nodeToEdge, &edgeVector);
     if( edgeRowid == newRowid ){
+      // deletes can leave "zombie" edges in the graph and we must override them and not store duplicate edges in the node
       return i;
     }
 
@@ -1427,8 +1356,11 @@ static int diskAnnReplaceEdgeIdx(
   return iReplace;
 }
 
+// prune edges after we inserted new edge at position iInserted
+// we only need to check for edges which will be pruned by new vertex
+// no need to check for other pairs as we checked them on previous insertions
 static void diskAnnPruneEdges(const DiskAnnIndex *pIndex, BlobSpot *pNodeBlob, int iInserted, VectorPair *pPlaceholder) {
-  int i, nEdges;
+  int i, s, nEdges;
   Vector nodeVector, hintEdgeVector;
   u64 hintRowid;
 
@@ -1439,8 +1371,14 @@ static void diskAnnPruneEdges(const DiskAnnIndex *pIndex, BlobSpot *pNodeBlob, i
 
   assert( 0 <= iInserted && iInserted < nEdges );
 
+#if defined(SQLITE_DEBUG) && defined(SQLITE_VECTOR_TRACE)
+  DiskAnnTrace(("before pruning:\n"));
+  nodeBinDebug(pIndex, pNodeBlob);
+#endif
+
   nodeBinEdge(pIndex, pNodeBlob, iInserted, &hintRowid, NULL, &hintEdgeVector);
 
+  // remove edges which is no longer interesting due to the addition of iInserted
   i = 0;
   while( i < nEdges ){
     Vector edgeVector;
@@ -1465,13 +1403,21 @@ static void diskAnnPruneEdges(const DiskAnnIndex *pIndex, BlobSpot *pNodeBlob, i
     }
   }
 
+#if defined(SQLITE_DEBUG) && defined(SQLITE_VECTOR_TRACE)
+  DiskAnnTrace(("after pruning:\n"));
+  nodeBinDebug(pIndex, pNodeBlob);
+#endif
+
+  // Every node needs at least one edge node so that the graph is connected.
   assert( nEdges > 0 );
 }
 
-/* main search routine - called from both SEARCH and INSERT operation */
+// main search routine - called from both SEARCH and INSERT operation
 static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u64 nStartRowid, char **pzErrMsg){
   DiskAnnTrace(("diskAnnSearchInternal: ready to search: rootId=%lld\n", nStartRowid));
   DiskAnnNode *start = NULL;
+  // in case of SEARCH operation (blobMode == DISKANN_BLOB_READONLY) we don't need to preserve all node blobs in the memory
+  // so we will reload them to the single blob instead of creating new blob for every new visited node
   BlobSpot *pReusableBlobSpot = NULL;
   Vector startVector;
   float startDistance;
@@ -1479,20 +1425,20 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
 
   start = diskAnnNodeAlloc(pIndex, nStartRowid);
   if( start == NULL ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(search): failed to allocate new node");
-    rc = SQLITE4_NOMEM;
+    *pzErrMsg = sqlite3_mprintf("vector index(search): failed to allocate new node");
+    rc = SQLITE_NOMEM_BKPT;
     goto out;
   }
 
   rc = blobSpotCreate(pIndex, &start->pBlobSpot, nStartRowid, pIndex->nBlockSize, pCtx->blobMode);
-  if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(search): failed to create new blob");
+  if( rc != SQLITE_OK ){
+    *pzErrMsg = sqlite3_mprintf("vector index(search): failed to create new blob");
     goto out;
   }
 
   rc = blobSpotReload(pIndex, start->pBlobSpot, nStartRowid, pIndex->nBlockSize);
-  if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(search): failed to load new blob");
+  if( rc != SQLITE_OK ){
+    *pzErrMsg = sqlite3_mprintf("vector index(search): failed to load new blob");
     goto out;
   }
 
@@ -1504,6 +1450,8 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
     pReusableBlobSpot = start->pBlobSpot;
     start->pBlobSpot = NULL;
   }
+  // we are transferring ownership of start node to the DiskAnnSearchCtx - so we no longer need to clean up anything in this function
+  // (caller must take care of DiskAnnSearchCtx resource reclamation)
   diskAnnSearchCtxInsertCandidate(pCtx, 0, start, startDistance);
   start = NULL;
 
@@ -1516,25 +1464,29 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
     int iCandidate = diskAnnSearchCtxFindClosestCandidateIdx(pCtx);
     diskAnnSearchCtxGetCandidate(pCtx, iCandidate, &pCandidate, &distance);
 
-    rc = SQLITE4_OK;
+    rc = SQLITE_OK;
     if( pReusableBlobSpot != NULL ){
       rc = blobSpotReload(pIndex, pReusableBlobSpot, pCandidate->nRowid, pIndex->nBlockSize);
       pCandidateBlob = pReusableBlobSpot;
     }else{
+      // we are lazy-loading blobs, so pBlobSpot usually NULL except for the first start node
       if( pCandidate->pBlobSpot == NULL ){
         rc = blobSpotCreate(pIndex, &pCandidate->pBlobSpot, pCandidate->nRowid, pIndex->nBlockSize, pCtx->blobMode);
       }
-      if( rc == SQLITE4_OK ){
+      if( rc == SQLITE_OK ){
         rc = blobSpotReload(pIndex, pCandidate->pBlobSpot, pCandidate->nRowid, pIndex->nBlockSize);
       }
       pCandidateBlob = pCandidate->pBlobSpot;
     }
 
     if( rc == DISKANN_ROW_NOT_FOUND ){
+      // it's possible that some edges corresponds to already deleted nodes - so processing this case gracefully
+      // (since we store only "forward" edges of the graph - we can accidentally preserve some "zombie" edges in the graph)
+      // todo: we better to fix graph and remove these edges from node (but it must be done carefully since we have READONLY and WRITABLE separate modes)
       diskAnnSearchCtxDeleteCandidate(pCtx, iCandidate);
       continue;
-    }else if( rc != SQLITE4_OK ){
-      *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(search): failed to create new blob for candidate");
+    }else if( rc != SQLITE_OK ){
+      *pzErrMsg = sqlite3_mprintf("vector index(search): failed to create new blob for candidate");
       goto out;
     }
 
@@ -1545,6 +1497,7 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
     nEdges = nodeBinEdges(pIndex, pCandidateBlob);
     g_searchEdgesTotal += nEdges;
 
+    // if pNodeQuery != pEdgeQuery then distance from aDistances is approximate and we must recalculate it
     if( pCtx->query.pNode != pCtx->query.pEdge ){
       distance = diskAnnVectorDistance(pIndex, &vCandidate, pCtx->query.pNode);
     }
@@ -1572,10 +1525,19 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
         continue;
       }
       DiskAnnTrace(("want to insert new candidate %lld at position %d with distance %f\n", edgeRowid, iInsert, edgeDistance));
+      // note that here we are inserting "bare" candidate with NULL blob
+      // this way we fully postpone blob loading until we will really visit the candidate
+      // (and this is not always the case since other better candidate can excommunicate this candidate)
       diskAnnSearchCtxInsertCandidate(pCtx, iInsert, pNewCandidate, edgeDistance);
     }
   }
-  rc = SQLITE4_OK;
+  DiskAnnTrace(("diskAnnSearchInternal: search context in the end\n", nStartRowid));
+#if defined(SQLITE_DEBUG) && defined(SQLITE_VECTOR_TRACE)
+  for(i = 0; i < pCtx->nCandidates; i++){
+    DiskAnnTrace(("%lld(%f) ", pCtx->aCandidates[i]->nRowid, pCtx->aDistances[i]));
+  }
+  DiskAnnTrace(("\n"));
+#endif
 out:
   if( start != NULL ){
     diskAnnNodeFree(start);
@@ -1583,13 +1545,14 @@ out:
   if( pReusableBlobSpot != NULL ){
     blobSpotFree(pReusableBlobSpot);
   }
-  return rc;
+  return SQLITE_OK;
 }
 
 /**************************************************************************
 ** DiskANN main internal API
 **************************************************************************/
 
+// search k nearest neighbours for pVector in the pIndex (with pKey primary key structure) and put result in the pRows output
 int diskAnnSearch(
   DiskAnnIndex *pIndex,
   const Vector *pVector,
@@ -1598,47 +1561,47 @@ int diskAnnSearch(
   VectorOutRows *pRows,
   char **pzErrMsg
 ){
-  int rc = SQLITE4_OK;
+  int rc = SQLITE_OK;
   DiskAnnSearchCtx ctx;
   u64 nStartRowid;
   int nOutRows;
   int i;
   struct timespec _q0, _q1, _qs0, _qs1, _qi0, _qi1, _qg0, _qg1, _qr0, _qr1, _qd0, _qd1;
-  double kvReadBefore, kvReadAfter;
-  double kvCursorOpenBefore, kvCursorOpenAfter;
-  double kvSeekBefore, kvSeekAfter;
-  double kvDataBefore, kvDataAfter;
-  double kvDecodeBefore, kvDecodeAfter;
-  double kvMemcpyBefore, kvMemcpyAfter;
-  int kvReadCountBefore, kvReadCountAfter;
+  double blobReadBefore, blobReadAfter;
+  double blobOpenBefore, blobOpenAfter;
+  double blobReopenBefore, blobReopenAfter;
+  double blobReadCallBefore, blobReadCallAfter;
+  int blobCacheHitBefore, blobCacheHitAfter;
+  int blobCacheMissBefore, blobCacheMissAfter;
+  int blobReadCountBefore, blobReadCountAfter;
   int visitedBefore, visitedAfter;
   long long edgesBefore, edgesAfter;
 
   DiskAnnTrace(("diskAnnSearch started\n"));
 
   if( k < 0 ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(search): k must be a non-negative integer");
-    return SQLITE4_ERROR;
+    *pzErrMsg = sqlite3_mprintf("vector index(search): k must be a non-negative integer");
+    return SQLITE_ERROR;
   }
   if( pVector->dims != pIndex->nVectorDims ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(search): dimensions are different: %d != %d", pVector->dims, pIndex->nVectorDims);
-    return SQLITE4_ERROR;
+    *pzErrMsg = sqlite3_mprintf("vector index(search): dimensions are different: %d != %d", pVector->dims, pIndex->nVectorDims);
+    return SQLITE_ERROR;
   }
   if( pVector->type != pIndex->nNodeVectorType ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(search): vector type differs from column type: %d != %d", pVector->type, pIndex->nNodeVectorType);
-    return SQLITE4_ERROR;
+    *pzErrMsg = sqlite3_mprintf("vector index(search): vector type differs from column type: %d != %d", pVector->type, pIndex->nNodeVectorType);
+    return SQLITE_ERROR;
   }
 
   clock_gettime(CLOCK_MONOTONIC, &_q0);
 
-  /* Snapshot counters before search to isolate search-only KV reads */
-  kvReadBefore = g_totalKvReadMs;
-  kvCursorOpenBefore = g_totalKvCursorOpenMs;
-  kvSeekBefore = g_totalKvSeekMs;
-  kvDataBefore = g_totalKvDataMs;
-  kvDecodeBefore = g_totalKvDecodeMs;
-  kvMemcpyBefore = g_totalKvMemcpyMs;
-  kvReadCountBefore = pIndex->nReads;
+  /* Snapshot counters before search */
+  blobReadBefore = g_totalBlobReadMs;
+  blobOpenBefore = g_totalBlobOpenMs;
+  blobReopenBefore = g_totalBlobReopenMs;
+  blobReadCallBefore = g_totalBlobReadCallMs;
+  blobCacheHitBefore = g_totalBlobCacheHits;
+  blobCacheMissBefore = g_totalBlobCacheMisses;
+  blobReadCountBefore = pIndex->nReads;
   visitedBefore = g_searchVisitedTotal;
   edgesBefore = g_searchEdgesTotal;
 
@@ -1646,19 +1609,19 @@ int diskAnnSearch(
   clock_gettime(CLOCK_MONOTONIC, &_qs0);
   rc = diskAnnSelectRandomShadowRow(pIndex, &nStartRowid);
   clock_gettime(CLOCK_MONOTONIC, &_qs1);
-  if( rc == SQLITE4_DONE ){
+  if( rc == SQLITE_DONE ){
     pRows->nRows = 0;
     pRows->nCols = pKey->nKeyColumns;
-    return SQLITE4_OK;
-  }else if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(search): failed to select start node for search");
+    return SQLITE_OK;
+  }else if( rc != SQLITE_OK ){
+    *pzErrMsg = sqlite3_mprintf("vector index(search): failed to select start node for search");
     return rc;
   }
   clock_gettime(CLOCK_MONOTONIC, &_qi0);
   rc = diskAnnSearchCtxInit(pIndex, &ctx, pVector, pIndex->searchL, k, DISKANN_BLOB_READONLY);
   clock_gettime(CLOCK_MONOTONIC, &_qi1);
-  if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(search): failed to initialize search context");
+  if( rc != SQLITE_OK ){
+    *pzErrMsg = sqlite3_mprintf("vector index(search): failed to initialize search context");
     goto out;
   }
 
@@ -1667,7 +1630,7 @@ int diskAnnSearch(
   rc = diskAnnSearchInternal(pIndex, &ctx, nStartRowid, pzErrMsg);
   g_distTimingMode = 0;
   clock_gettime(CLOCK_MONOTONIC, &_qg1);
-  if( rc != SQLITE4_OK ){
+  if( rc != SQLITE_OK ){
     goto out;
   }
 
@@ -1675,8 +1638,8 @@ int diskAnnSearch(
   clock_gettime(CLOCK_MONOTONIC, &_qr0);
   nOutRows = MIN(k, ctx.nTopCandidates);
   rc = vectorOutRowsAlloc(pIndex->db, pRows, nOutRows, pKey->nKeyColumns, vectorIdxKeyRowidLike(pKey));
-  if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(search): failed to allocate output rows");
+  if( rc != SQLITE_OK ){
+    *pzErrMsg = sqlite3_mprintf("vector index(search): failed to allocate output rows");
     goto out;
   }
   for(i = 0; i < nOutRows; i++){
@@ -1685,30 +1648,30 @@ int diskAnnSearch(
     }else{
       rc = diskAnnGetShadowRowKeys(pIndex, ctx.aTopCandidates[i]->nRowid, pKey, pRows, i);
     }
-    if( rc != SQLITE4_OK ){
-      *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(search): failed to put result in the output row");
+    if( rc != SQLITE_OK ){
+      *pzErrMsg = sqlite3_mprintf("vector index(search): failed to put result in the output row");
       goto out;
     }
   }
   clock_gettime(CLOCK_MONOTONIC, &_qr1);
 
   /* Accumulate search stats */
-  kvReadAfter = g_totalKvReadMs;
-  kvCursorOpenAfter = g_totalKvCursorOpenMs;
-  kvSeekAfter = g_totalKvSeekMs;
-  kvDataAfter = g_totalKvDataMs;
-  kvDecodeAfter = g_totalKvDecodeMs;
-  kvMemcpyAfter = g_totalKvMemcpyMs;
-  kvReadCountAfter = pIndex->nReads;
+  blobReadAfter = g_totalBlobReadMs;
+  blobOpenAfter = g_totalBlobOpenMs;
+  blobReopenAfter = g_totalBlobReopenMs;
+  blobReadCallAfter = g_totalBlobReadCallMs;
+  blobCacheHitAfter = g_totalBlobCacheHits;
+  blobCacheMissAfter = g_totalBlobCacheMisses;
+  blobReadCountAfter = pIndex->nReads;
   visitedAfter = g_searchVisitedTotal;
   edgesAfter = g_searchEdgesTotal;
 
-  rc = SQLITE4_OK;
+  rc = SQLITE_OK;
 out:
   clock_gettime(CLOCK_MONOTONIC, &_qd0);
   diskAnnSearchCtxDeinit(&ctx);
   clock_gettime(CLOCK_MONOTONIC, &_qd1);
-  if( rc == SQLITE4_OK ){
+  if( rc == SQLITE_OK ){
     clock_gettime(CLOCK_MONOTONIC, &_q1);
     g_queryCount++;
     g_queryTotalMs += diskAnnMsBetween(&_q0, &_q1);
@@ -1717,19 +1680,20 @@ out:
     g_queryGraphMs += diskAnnMsBetween(&_qg0, &_qg1);
     g_queryResultMs += diskAnnMsBetween(&_qr0, &_qr1);
     g_queryCtxDeinitMs += diskAnnMsBetween(&_qd0, &_qd1);
-    g_queryKvReadMs += (kvReadAfter - kvReadBefore);
-    g_queryKvCursorOpenMs += (kvCursorOpenAfter - kvCursorOpenBefore);
-    g_queryKvSeekMs += (kvSeekAfter - kvSeekBefore);
-    g_queryKvDataMs += (kvDataAfter - kvDataBefore);
-    g_queryKvDecodeMs += (kvDecodeAfter - kvDecodeBefore);
-    g_queryKvMemcpyMs += (kvMemcpyAfter - kvMemcpyBefore);
-    g_queryKvReads += (kvReadCountAfter - kvReadCountBefore);
+    g_queryBlobReadMs += (blobReadAfter - blobReadBefore);
+    g_queryBlobOpenMs += (blobOpenAfter - blobOpenBefore);
+    g_queryBlobReopenMs += (blobReopenAfter - blobReopenBefore);
+    g_queryBlobReadCallMs += (blobReadCallAfter - blobReadCallBefore);
+    g_queryBlobCacheHits += (blobCacheHitAfter - blobCacheHitBefore);
+    g_queryBlobCacheMisses += (blobCacheMissAfter - blobCacheMissBefore);
+    g_queryBlobReads += (blobReadCountAfter - blobReadCountBefore);
     g_queryNodesVisited += (visitedAfter - visitedBefore);
     g_queryEdgesExamined += (edgesAfter - edgesBefore);
   }
   return rc;
 }
 
+// insert pVectorInRow in the pIndex
 int diskAnnInsert(
   DiskAnnIndex *pIndex,
   const VectorInRow *pVectorInRow,
@@ -1742,190 +1706,174 @@ int diskAnnInsert(
   DiskAnnSearchCtx ctx;
   VectorPair vInsert, vCandidate;
   double buildReadStart = 0.0, buildWriteStart = 0.0, buildDistStart = 0.0;
-  double insertLsmStart = g_autoworkTotalMs;
   double buildReadMs = 0.0, buildWriteMs = 0.0, buildDistMs = 0.0;
-  struct timespec _trav0, _trav1;
+  struct timespec _ts0, _ts1, _si0, _si1, _p1a, _p1b, _p2a, _p2b, _fl0, _fl1;
   vInsert.pNode = NULL; vInsert.pEdge = NULL;
   vCandidate.pNode = NULL; vCandidate.pEdge = NULL;
 
+  g_totalInsertCount++;
+
   if( pVectorInRow->pVector->dims != pIndex->nVectorDims ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): dimensions are different: %d != %d", pVectorInRow->pVector->dims, pIndex->nVectorDims);
-    return SQLITE4_ERROR;
+    *pzErrMsg = sqlite3_mprintf("vector index(insert): dimensions are different: %d != %d", pVectorInRow->pVector->dims, pIndex->nVectorDims);
+    return SQLITE_ERROR;
   }
   if( pVectorInRow->pVector->type != pIndex->nNodeVectorType ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): vector type differs from column type: %d != %d", pVectorInRow->pVector->type, pIndex->nNodeVectorType);
-    return SQLITE4_ERROR;
+    *pzErrMsg = sqlite3_mprintf("vector index(insert): vector type differs from column type: %d != %d", pVectorInRow->pVector->type, pIndex->nNodeVectorType);
+    return SQLITE_ERROR;
   }
 
-  DiskAnnTrace(("diskAnnInsert started\n"));
+  DiskAnnTrace(("diskAnnInset started\n"));
 
   rc = diskAnnSearchCtxInit(pIndex, &ctx, pVectorInRow->pVector, pIndex->insertL, 1, DISKANN_BLOB_WRITABLE);
-  if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): failed to initialize search context");
+  if( rc != SQLITE_OK ){
+    *pzErrMsg = sqlite3_mprintf("vector index(insert): failed to initialize search context");
     return rc;
   }
 
   if( initVectorPair(pIndex->nNodeVectorType, pIndex->nEdgeVectorType, pIndex->nVectorDims, &vInsert) != 0 ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): unable to allocate mem for node VectorPair");
-    rc = SQLITE4_NOMEM;
+    *pzErrMsg = sqlite3_mprintf("vector index(insert): unable to allocate mem for node VectorPair");
+    rc = SQLITE_NOMEM_BKPT;
     goto out;
   }
 
   if( initVectorPair(pIndex->nNodeVectorType, pIndex->nEdgeVectorType, pIndex->nVectorDims, &vCandidate) != 0 ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): unable to allocate mem for candidate VectorPair");
-    rc = SQLITE4_NOMEM;
+    *pzErrMsg = sqlite3_mprintf("vector index(insert): unable to allocate mem for candidate VectorPair");
+    rc = SQLITE_NOMEM_BKPT;
     goto out;
   }
 
-  /* select random row before inserting new row */
-  clock_gettime(CLOCK_MONOTONIC, &_trav0);
+  // note: we must select random row before we will insert new row in the shadow table
+  clock_gettime(CLOCK_MONOTONIC, &_ts0);
   rc = diskAnnSelectRandomShadowRow(pIndex, &nStartRowid);
-  if( rc == SQLITE4_DONE ){
+  if( rc == SQLITE_DONE ){
     first = 1;
-  }else if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): failed to select start node for search");
-    rc = SQLITE4_ERROR;
+  }else if( rc != SQLITE_OK ){
+    *pzErrMsg = sqlite3_mprintf("vector index(insert): failed to select start node for search");
+    rc = SQLITE_ERROR;
     goto out;
   }
   if( !first ){
-    buildReadStart = g_totalKvReadMs;
-    buildWriteStart = g_totalKvWriteMs;
+    buildReadStart = g_totalBlobReadMs;
+    buildWriteStart = g_totalBlobWriteMs;
     buildDistStart = g_buildDistanceMs;
     g_distTimingMode = 2;
     rc = diskAnnSearchInternal(pIndex, &ctx, nStartRowid, pzErrMsg);
     g_distTimingMode = 0;
-    clock_gettime(CLOCK_MONOTONIC, &_trav1);
-    pIndex->totalSearchMs += (_trav1.tv_sec - _trav0.tv_sec)*1000.0
-                           + (_trav1.tv_nsec - _trav0.tv_nsec)/1e6;
-    buildReadMs += g_totalKvReadMs - buildReadStart;
-    buildWriteMs += g_totalKvWriteMs - buildWriteStart;
-    buildDistMs += g_buildDistanceMs - buildDistStart;
-    if( rc != SQLITE4_OK ){
+    clock_gettime(CLOCK_MONOTONIC, &_ts1);
+    g_totalSearchMs += (_ts1.tv_sec - _ts0.tv_sec)*1000.0
+                     + (_ts1.tv_nsec - _ts0.tv_nsec)/1e6;
+    g_totalBuildReadMs += g_totalBlobReadMs - buildReadStart;
+    g_totalBuildWriteMs += g_totalBlobWriteMs - buildWriteStart;
+    g_totalBuildDistMs += g_buildDistanceMs - buildDistStart;
+    if( rc != SQLITE_OK ){
       goto out;
     }
   }
 
   {
-    struct timespec _si0, _si1;
     clock_gettime(CLOCK_MONOTONIC, &_si0);
     rc = diskAnnInsertShadowRow(pIndex, pVectorInRow, &nNewRowid);
     clock_gettime(CLOCK_MONOTONIC, &_si1);
-    pIndex->totalShadowInsMs += (_si1.tv_sec - _si0.tv_sec)*1000.0
-                              + (_si1.tv_nsec - _si0.tv_nsec)/1e6;
+    g_totalShadowInsMs += (_si1.tv_sec - _si0.tv_sec)*1000.0
+                        + (_si1.tv_nsec - _si0.tv_nsec)/1e6;
   }
-  if( rc == SQLITE4_OK ){
-    pIndex->nShadowRows++;
-  }
-  if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): failed to insert shadow row");
+  if( rc != SQLITE_OK ){
+    *pzErrMsg = sqlite3_mprintf("vector index(insert): failed to insert shadow row");
     goto out;
   }
 
   rc = blobSpotCreate(pIndex, &pBlobSpot, nNewRowid, pIndex->nBlockSize, 1);
-  if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): failed to create blob for shadow row");
+  if( rc != SQLITE_OK ){
+    *pzErrMsg = sqlite3_mprintf("vector index(insert): failed to read blob for shadow row");
     goto out;
   }
   nodeBinInit(pIndex, pBlobSpot, nNewRowid, pVectorInRow->pVector);
 
   if( first ){
     DiskAnnTrace(("inserted first row\n"));
-    rc = SQLITE4_OK;
+    rc = SQLITE_OK;
     goto out;
   }
-
-  /* first pass - add all visited nodes as potential neighbours of new node */
-  buildReadStart = g_totalKvReadMs;
-  buildWriteStart = g_totalKvWriteMs;
+  // first pass - add all visited nodes as a potential neighbours of new node
+  buildReadStart = g_totalBlobReadMs;
+  buildWriteStart = g_totalBlobWriteMs;
   buildDistStart = g_buildDistanceMs;
   g_distTimingMode = 2;
-  {
-    struct timespec _p1a, _p1b;
-    clock_gettime(CLOCK_MONOTONIC, &_p1a);
-    for(pVisited = ctx.visitedList; pVisited != NULL; pVisited = pVisited->pNext){
-      Vector nodeVector;
-      int iReplace;
-      float nodeToNew;
-      nodeBinVector(pIndex, pVisited->pBlobSpot, &nodeVector);
-      loadVectorPair(&vCandidate, &nodeVector);
-      iReplace = diskAnnReplaceEdgeIdx(pIndex, pBlobSpot, pVisited->nRowid, &vCandidate, &vInsert, &nodeToNew);
-      if( iReplace == -1 ){
-        continue;
-      }
-      nodeBinReplaceEdge(pIndex, pBlobSpot, iReplace, pVisited->nRowid, nodeToNew, vCandidate.pEdge);
-      diskAnnPruneEdges(pIndex, pBlobSpot, iReplace, &vInsert);
+  clock_gettime(CLOCK_MONOTONIC, &_p1a);
+  for(pVisited = ctx.visitedList; pVisited != NULL; pVisited = pVisited->pNext){
+    Vector nodeVector;
+    int iReplace;
+    float nodeToNew;
+
+    nodeBinVector(pIndex, pVisited->pBlobSpot, &nodeVector);
+    loadVectorPair(&vCandidate, &nodeVector);
+
+    iReplace = diskAnnReplaceEdgeIdx(pIndex, pBlobSpot, pVisited->nRowid, &vCandidate, &vInsert, &nodeToNew);
+    if( iReplace == -1 ){
+      continue;
     }
-    clock_gettime(CLOCK_MONOTONIC, &_p1b);
-    pIndex->totalPass1Ms += (_p1b.tv_sec - _p1a.tv_sec)*1000.0
-                          + (_p1b.tv_nsec - _p1a.tv_nsec)/1e6;
+    nodeBinReplaceEdge(pIndex, pBlobSpot, iReplace, pVisited->nRowid, nodeToNew, vCandidate.pEdge);
+    diskAnnPruneEdges(pIndex, pBlobSpot, iReplace, &vInsert);
   }
+  clock_gettime(CLOCK_MONOTONIC, &_p1b);
+  g_totalPass1Ms += (_p1b.tv_sec - _p1a.tv_sec)*1000.0
+                  + (_p1b.tv_nsec - _p1a.tv_nsec)/1e6;
 
-  /* second pass - add new node as potential neighbour of all visited nodes */
-  {
-    struct timespec _p2a, _p2b;
-    clock_gettime(CLOCK_MONOTONIC, &_p2a);
-    loadVectorPair(&vInsert, pVectorInRow->pVector);
-    for(pVisited = ctx.visitedList; pVisited != NULL; pVisited = pVisited->pNext){
-      int iReplace;
-      float nodeToNew;
+  // second pass - add new node as a potential neighbour of all visited nodes
+  clock_gettime(CLOCK_MONOTONIC, &_p2a);
+  loadVectorPair(&vInsert, pVectorInRow->pVector);
+  for(pVisited = ctx.visitedList; pVisited != NULL; pVisited = pVisited->pNext){
+    int iReplace;
+    float nodeToNew;
 
-      pIndex->totalPass2Visited++;
-      iReplace = diskAnnReplaceEdgeIdx(pIndex, pVisited->pBlobSpot, nNewRowid, &vInsert, &vCandidate, &nodeToNew);
-      if( iReplace == -1 ){
-        continue;
-      }
-      pIndex->totalPass2EdgeUpdates++;
-      nodeBinReplaceEdge(pIndex, pVisited->pBlobSpot, iReplace, nNewRowid, nodeToNew, vInsert.pEdge);
-      diskAnnPruneEdges(pIndex, pVisited->pBlobSpot, iReplace, &vCandidate);
-
-      rc = blobSpotFlush(pIndex, pVisited->pBlobSpot);
-      if( rc != SQLITE4_OK ){
-        *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): failed to flush blob");
-        goto out;
-      }
-      pIndex->totalExistingFlushes++;
-      pIndex->totalExistingFlushBytes += pVisited->pBlobSpot->nBufferSize;
+    iReplace = diskAnnReplaceEdgeIdx(pIndex, pVisited->pBlobSpot, nNewRowid, &vInsert, &vCandidate, &nodeToNew);
+    if( iReplace == -1 ){
+      continue;
     }
-    clock_gettime(CLOCK_MONOTONIC, &_p2b);
-    pIndex->totalPass2Ms += (_p2b.tv_sec - _p2a.tv_sec)*1000.0
-                          + (_p2b.tv_nsec - _p2a.tv_nsec)/1e6;
+    nodeBinReplaceEdge(pIndex, pVisited->pBlobSpot, iReplace, nNewRowid, nodeToNew, vInsert.pEdge);
+    diskAnnPruneEdges(pIndex, pVisited->pBlobSpot, iReplace, &vCandidate);
+
+    rc = blobSpotFlush(pIndex, pVisited->pBlobSpot);
+    if( rc != SQLITE_OK ){
+      *pzErrMsg = sqlite3_mprintf("vector index(insert): failed to flush blob");
+      goto out;
+    }
   }
+  clock_gettime(CLOCK_MONOTONIC, &_p2b);
+  g_totalPass2Ms += (_p2b.tv_sec - _p2a.tv_sec)*1000.0
+                  + (_p2b.tv_nsec - _p2a.tv_nsec)/1e6;
   g_distTimingMode = 0;
 
-  rc = SQLITE4_OK;
+  rc = SQLITE_OK;
 out:
   g_distTimingMode = 0;
   deinitVectorPair(&vInsert);
   deinitVectorPair(&vCandidate);
-  if( rc == SQLITE4_OK ){
-    struct timespec _fl0, _fl1;
+  if( rc == SQLITE_OK ){
     clock_gettime(CLOCK_MONOTONIC, &_fl0);
     rc = blobSpotFlush(pIndex, pBlobSpot);
     clock_gettime(CLOCK_MONOTONIC, &_fl1);
-    pIndex->totalNewFlushMs += (_fl1.tv_sec - _fl0.tv_sec)*1000.0
-                             + (_fl1.tv_nsec - _fl0.tv_nsec)/1e6;
-    if( rc != SQLITE4_OK ){
-      *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(insert): failed to flush blob");
+    g_totalFlushMs += (_fl1.tv_sec - _fl0.tv_sec)*1000.0
+                    + (_fl1.tv_nsec - _fl0.tv_nsec)/1e6;
+    if( rc != SQLITE_OK ){
+      *pzErrMsg = sqlite3_mprintf("vector index(insert): failed to flush blob");
     }else{
-      pIndex->totalNewFlushes++;
-      pIndex->totalNewFlushBytes += pBlobSpot->nBufferSize;
-      buildReadMs += g_totalKvReadMs - buildReadStart;
-      buildWriteMs += g_totalKvWriteMs - buildWriteStart;
+      buildReadMs += g_totalBlobReadMs - buildReadStart;
+      buildWriteMs += g_totalBlobWriteMs - buildWriteStart;
       buildDistMs += g_buildDistanceMs - buildDistStart;
-      pIndex->totalBuildReadMs += buildReadMs;
-      pIndex->totalBuildWriteMs += buildWriteMs;
-      pIndex->totalBuildDistMs += buildDistMs;
-      pIndex->totalBuildLsmMs += g_autoworkTotalMs - insertLsmStart;
+      g_totalBuildReadMs += buildReadMs;
+      g_totalBuildWriteMs += buildWriteMs;
+      g_totalBuildDistMs += buildDistMs;
     }
   }
   if( pBlobSpot != NULL ){
     blobSpotFree(pBlobSpot);
   }
   diskAnnSearchCtxDeinit(&ctx);
-
   return rc;
 }
 
+// delete pInRow from pIndex
 int diskAnnDelete(
   DiskAnnIndex *pIndex,
   const VectorInRow *pInRow,
@@ -1935,11 +1883,10 @@ int diskAnnDelete(
   BlobSpot *pNodeBlob = NULL, *pEdgeBlob = NULL;
   u64 nodeRowid;
   int iDelete, nNeighbours, i;
-
   if( vectorInRowTryGetRowid(pInRow, &nodeRowid) != 0 ){
     rc = diskAnnGetShadowRowid(pIndex, pInRow, &nodeRowid);
-    if( rc != SQLITE4_OK ){
-      *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(delete): failed to determined node id for deletion");
+    if( rc != SQLITE_OK ){
+      *pzErrMsg = sqlite3_mprintf("vector index(delete): failed to determined node id for deletion");
       goto out;
     }
   }
@@ -1948,23 +1895,22 @@ int diskAnnDelete(
 
   rc = blobSpotCreate(pIndex, &pNodeBlob, nodeRowid, pIndex->nBlockSize, DISKANN_BLOB_WRITABLE);
   if( rc == DISKANN_ROW_NOT_FOUND ){
-    rc = SQLITE4_OK;
+    // as we omit rows with NULL values during insert, it can be the case that there is nothing to delete in the index, while row exists in the base table
+    // so, we must simply silently stop delete process as there is nothing to delete from index
+    rc = SQLITE_OK;
     goto out;
-  }else if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(delete): failed to create blob for node row");
+  }else if( rc != SQLITE_OK ){
+    *pzErrMsg = sqlite3_mprintf("vector index(delete): failed to create blob for node row");
     goto out;
   }
   rc = blobSpotReload(pIndex, pNodeBlob, nodeRowid, pIndex->nBlockSize);
-  if( rc == DISKANN_ROW_NOT_FOUND ){
-    rc = SQLITE4_OK;
-    goto out;
-  }else if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(delete): failed to reload blob for node row");
+  if( rc != 0 ){
+    *pzErrMsg = sqlite3_mprintf("vector index(delete): failed to reload blob for node row");
     goto out;
   }
   rc = blobSpotCreate(pIndex, &pEdgeBlob, nodeRowid, pIndex->nBlockSize, DISKANN_BLOB_WRITABLE);
-  if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(delete): failed to create blob for edge rows");
+  if( rc != SQLITE_OK ){
+    *pzErrMsg = sqlite3_mprintf("vector index(delete): failed to create blob for edge rows");
     goto out;
   }
   nNeighbours = nodeBinEdges(pIndex, pNodeBlob);
@@ -1974,30 +1920,29 @@ int diskAnnDelete(
     rc = blobSpotReload(pIndex, pEdgeBlob, edgeRowid, pIndex->nBlockSize);
     if( rc == DISKANN_ROW_NOT_FOUND ){
       continue;
-    }else if( rc != SQLITE4_OK ){
-      *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(delete): failed to reload blob for edge row: %d", rc);
+    }else if( rc != SQLITE_OK ){
+      *pzErrMsg = sqlite3_mprintf("vector index(delete): failed to reload blob for edge row: %d", rc);
       goto out;
     }
-    iDelete = nodeBinEdgeFindIdx(pIndex, pEdgeBlob, nodeRowid);
+    iDelete = nodeBinEdgeFindIdx(pIndex, pEdgeBlob, edgeRowid);
     if( iDelete == -1 ){
       continue;
     }
     nodeBinDeleteEdge(pIndex, pEdgeBlob, iDelete);
     rc = blobSpotFlush(pIndex, pEdgeBlob);
-    if( rc != SQLITE4_OK ){
-      *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(delete): failed to flush blob for edge row");
+    if( rc != SQLITE_OK ){
+      *pzErrMsg = sqlite3_mprintf("vector index(delete): failed to flush blob for edge row");
       goto out;
     }
   }
 
-  rc = diskAnnDeleteShadowRow(pIndex, (i64)nodeRowid);
-  if( rc != SQLITE4_OK ){
-    *pzErrMsg = sqlite4_mprintf(pIndex->db->pEnv, "vector index(delete): failed to remove shadow row");
+  rc = diskAnnDeleteShadowRow(pIndex, nodeRowid);
+  if( rc != SQLITE_OK ){
+    *pzErrMsg = sqlite3_mprintf("vector index(delete): failed to remove shadow row");
     goto out;
   }
-  if( pIndex->nShadowRows > 0 ) pIndex->nShadowRows--;
 
-  rc = SQLITE4_OK;
+  rc = SQLITE_OK;
 out:
   if( pNodeBlob != NULL ){
     blobSpotFree(pNodeBlob);
@@ -2008,31 +1953,31 @@ out:
   return rc;
 }
 
+// open index with zIdxName and pParams serialized binary parameters and set result to the ppIndex
 int diskAnnOpenIndex(
-  sqlite4 *db,
-  const char *zDbSName,
-  const char *zIdxName,
-  const VectorIdxParams *pParams,
-  DiskAnnIndex **ppIndex
+  sqlite3 *db,                       /* Database connection */
+  const char *zDbSName,              /* Database schema name */
+  const char *zIdxName,              /* Index name */
+  const VectorIdxParams *pParams,    /* Index parameters */
+  DiskAnnIndex **ppIndex             /* OUT: Index */
 ){
   DiskAnnIndex *pIndex;
   u64 nBlockSize;
   int compressNeighbours;
-
-  pIndex = sqlite4DbMallocRaw(db, sizeof(DiskAnnIndex));
+  pIndex = sqlite3DbMallocRaw(db, sizeof(DiskAnnIndex));
   if( pIndex == NULL ){
-    return SQLITE4_NOMEM;
+    return SQLITE_NOMEM;
   }
-  memset(pIndex, 0, sizeof(DiskAnnIndex));
   pIndex->db = db;
-  pIndex->zDbSName = sqlite4DbStrDup(db, zDbSName);
-  pIndex->zName = sqlite4DbStrDup(db, zIdxName);
-  pIndex->zShadow = sqlite4MPrintf(db, "%s_shadow", zIdxName);
+  pIndex->zDbSName = sqlite3DbStrDup(db, zDbSName);
+  pIndex->zName = sqlite3DbStrDup(db, zIdxName);
+  pIndex->zShadow = sqlite3MPrintf(db, "%s_shadow", zIdxName);
   if( pIndex->zShadow == NULL ){
     diskAnnCloseIndex(pIndex);
-    return SQLITE4_NOMEM;
+    return SQLITE_NOMEM_BKPT;
   }
   nBlockSize = vectorIdxParamsGetU64(pParams, VECTOR_BLOCK_SIZE_PARAM_ID);
+  // preserve backward compatibility: treat block size > 128 literally, but <= 128 with shift
   if( nBlockSize <= 128 ){
     nBlockSize <<= DISKANN_BLOCK_SIZE_SHIFT;
   }
@@ -2047,14 +1992,13 @@ int diskAnnOpenIndex(
   pIndex->searchL = vectorIdxParamsGetU64(pParams, VECTOR_SEARCH_L_PARAM_ID);
   pIndex->nReads = 0;
   pIndex->nWrites = 0;
-
   if( pIndex->nDistanceFunc == 0 ||
       pIndex->nBlockSize == 0 ||
       pIndex->nNodeVectorType == 0 ||
       pIndex->nVectorDims == 0
     ){
     diskAnnCloseIndex(pIndex);
-    return SQLITE4_ERROR;
+    return SQLITE_ERROR;
   }
   if( pIndex->pruningAlpha == 0 ){
     pIndex->pruningAlpha = VECTOR_PRUNING_ALPHA_DEFAULT;
@@ -2076,90 +2020,59 @@ int diskAnnOpenIndex(
     pIndex->nEdgeVectorSize = vectorDataSize(compressNeighbours, pIndex->nVectorDims);
   }
 
-  /* Look up shadow table PK tnum for direct KV access */
-  {
-    Table *pShadowTab = sqlite4FindTable(db, pIndex->zShadow, zDbSName);
-    Index *pPk;
-    if( pShadowTab == NULL || pShadowTab->pIndex == NULL ){
-      diskAnnCloseIndex(pIndex);
-      return SQLITE4_ERROR;
-    }
-    /* Must use the PRIMARY KEY index tnum, not the secondary index.
-    ** pShadowTab->pIndex is the list head (last-created = secondary index).
-    ** Walk the list to find the PK index (eIndexType==SQLITE4_INDEX_PRIMARYKEY). */
-    pPk = sqlite4FindPrimaryKey(pShadowTab, 0);
-    if( pPk == NULL ){
-      diskAnnCloseIndex(pIndex);
-      return SQLITE4_ERROR;
-    }
-    pIndex->iShadowTnum = pPk->tnum;
-    pIndex->nKeyPrefix = sqlite4PutVarint64(pIndex->aKeyPrefix, pIndex->iShadowTnum);
-  }
-
-  /* Count existing shadow rows by seeking to last row in shadow table */
-  {
-    KVCursor *pCsr = NULL;
-    u8 aEndKey[10];
-    int nEndKey;
-    /* Build a key just past the shadow table range (tnum+1) */
-    nEndKey = sqlite4PutVarint64(aEndKey, pIndex->iShadowTnum + 1);
-    if( sqlite4KVStoreOpenCursor(db->aDb[0].pKV, &pCsr) == SQLITE4_OK ){
-      int seekRc = sqlite4KVCursorSeek(pCsr, aEndKey, nEndKey, -1);
-      if( seekRc == SQLITE4_OK || seekRc == SQLITE4_INEXACT ){
-        const KVByteArray *pLastKey;
-        KVSize nLastKey;
-        /* Move back one to last row in our shadow table */
-        if( seekRc == SQLITE4_OK ){
-          sqlite4KVCursorPrev(pCsr);
-        }
-        if( sqlite4KVCursorKey(pCsr, &pLastKey, &nLastKey) == SQLITE4_OK &&
-            nLastKey > pIndex->nKeyPrefix &&
-            memcmp(pLastKey, pIndex->aKeyPrefix, pIndex->nKeyPrefix) == 0 ){
-          sqlite4_num num;
-          if( sqlite4VdbeDecodeNumericKey(
-                pLastKey + pIndex->nKeyPrefix,
-                nLastKey - pIndex->nKeyPrefix,
-                &num) > 0 ){
-            pIndex->nShadowRows = (i64)sqlite4_num_to_int64(num, 0);
-          }
-        }
-      }
-      sqlite4KVCursorClose(pCsr);
-    }
-  }
-
   *ppIndex = pIndex;
-
-  // fprintf(stderr, "diskAnnOpenIndex: %s  blockSize=%d  maxEdges=%d  insertL=%d  searchL=%d  formatVersion=%d\n",
-  //         zIdxName, pIndex->nBlockSize, nodeEdgesMaxCount(pIndex),
-  //         pIndex->insertL, pIndex->searchL, pIndex->nFormatVersion);
   DiskAnnTrace(("opened index %s: max edges %d\n", zIdxName, nodeEdgesMaxCount(pIndex)));
-  return SQLITE4_OK;
+  return SQLITE_OK;
 }
 
-static double g_totalSearchMs = 0;
-static double g_totalShadowInsMs = 0;
-static double g_totalPass1Ms = 0;
-static double g_totalPass2Ms = 0;
-static double g_totalNewFlushMs = 0;
-static double g_totalInsertStmtMs = 0;
-static double g_totalInsertOtherMs = 0;
-static double g_totalInsertFinishMs = 0;
-static double g_totalIndexBuildMs = 0;
-static double g_totalBuildReadMs = 0;
-static double g_totalBuildWriteMs = 0;
-static double g_totalBuildDistMs = 0;
-static double g_totalBuildLsmMs = 0;
-static int g_totalInsertStmtCount = 0;
-static int g_totalIndexBuildCount = 0;
-static long long g_totalPass2Visited = 0;
-static long long g_totalPass2EdgeUpdates = 0;
-static long long g_totalExistingFlushes = 0;
-static long long g_totalExistingFlushBytes = 0;
-static long long g_totalNewFlushes = 0;
-static long long g_totalNewFlushBytes = 0;
-static int g_totalInsertCount = 0;
-static int g_atexitRegistered = 0;
+static void diskAnnPrintSearchStats(void){
+  if( g_queryCount > 0 ){
+    double avgTotal = g_queryTotalMs / g_queryCount;
+    double avgCtxInit = g_queryCtxInitMs / g_queryCount;
+    double avgGraph = g_queryGraphMs / g_queryCount;
+    double avgResult = g_queryResultMs / g_queryCount;
+    double avgCtxDeinit = g_queryCtxDeinitMs / g_queryCount;
+    double avgBlobRead = g_queryBlobReadMs / g_queryCount;
+    double avgDist = g_queryDistanceMs / g_queryCount;
+    double qps = g_queryTotalMs > 0 ? g_queryCount / (g_queryTotalMs / 1000.0) : 0;
+    fprintf(stderr, "\n=== diskAnn search breakdown (%d queries) ===\n", g_queryCount);
+    fprintf(stderr, "  total:          %8.1f ms  (avg %.3f ms/q, %.0f q/s)\n",
+            g_queryTotalMs, avgTotal, qps);
+    fprintf(stderr, "  context init:   %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
+            g_queryCtxInitMs, avgCtxInit, g_queryCtxInitMs/g_queryTotalMs*100);
+    fprintf(stderr, "  graph traversal:%8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
+            g_queryGraphMs, avgGraph, g_queryGraphMs/g_queryTotalMs*100);
+    fprintf(stderr, "    query blob read path:%7.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
+            g_queryBlobReadMs, avgBlobRead,
+            g_queryGraphMs > 0 ? g_queryBlobReadMs/g_queryGraphMs*100 : 0);
+    fprintf(stderr, "      blob open:   %8.1f ms\n", g_queryBlobOpenMs);
+    fprintf(stderr, "      blob reopen: %8.1f ms\n", g_queryBlobReopenMs);
+    fprintf(stderr, "      blob read:   %8.1f ms  (cache hit/miss %d/%d)\n",
+            g_queryBlobReadCallMs, g_queryBlobCacheHits, g_queryBlobCacheMisses);
+    fprintf(stderr, "    query distance:%6.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
+            g_queryDistanceMs, avgDist,
+            g_queryGraphMs > 0 ? g_queryDistanceMs/g_queryGraphMs*100 : 0);
+    fprintf(stderr, "  result collect: %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
+            g_queryResultMs, avgResult, g_queryResultMs/g_queryTotalMs*100);
+    fprintf(stderr, "  context deinit: %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
+            g_queryCtxDeinitMs, avgCtxDeinit, g_queryCtxDeinitMs/g_queryTotalMs*100);
+    fprintf(stderr, "  vector search total:%5.1f ms\n", g_vectorSearchTotalMs);
+    fprintf(stderr, "    vector parse: %8.1f ms\n", g_vectorSearchParseMs);
+    fprintf(stderr, "    index lookup/open:%5.1f ms\n", g_vectorSearchLookupMs);
+    fprintf(stderr, "    diskAnn call: %8.1f ms\n", g_vectorSearchDiskAnnMs);
+    fprintf(stderr, "    vector cleanup:%7.1f ms\n", g_vectorSearchCloseMs);
+    fprintf(stderr, "================================================\n");
+  }
+}
+
+void diskAnnRecordVectorSearch(double totalMs, double parseMs, double lookupMs,
+                               double diskAnnMs, double closeMs){
+  g_vectorSearchTotalMs += totalMs;
+  g_vectorSearchParseMs += parseMs;
+  g_vectorSearchLookupMs += lookupMs;
+  g_vectorSearchDiskAnnMs += diskAnnMs;
+  g_vectorSearchCloseMs += closeMs;
+}
 
 void diskAnnRecordInsertStmt(double ms){
   g_totalInsertStmtMs += ms;
@@ -2179,69 +2092,11 @@ void diskAnnRecordIndexBuildTotal(double ms){
   g_totalIndexBuildCount++;
 }
 
-static void diskAnnPrintSearchStats(void){
-  if( g_queryCount > 0 ){
-    double avgTotal = g_queryTotalMs / g_queryCount;
-    double avgCtxInit = g_queryCtxInitMs / g_queryCount;
-    double avgGraph = g_queryGraphMs / g_queryCount;
-    double avgResult = g_queryResultMs / g_queryCount;
-    double avgCtxDeinit = g_queryCtxDeinitMs / g_queryCount;
-    double avgKvRead = g_queryKvReadMs / g_queryCount;
-    double avgDist = g_queryDistanceMs / g_queryCount;
-    double qps = g_queryTotalMs > 0 ? g_queryCount / (g_queryTotalMs / 1000.0) : 0;
-    fprintf(stderr, "\n=== diskAnn search breakdown (%d queries) ===\n", g_queryCount);
-    fprintf(stderr, "  total:          %8.1f ms  (avg %.3f ms/q, %.0f q/s)\n",
-            g_queryTotalMs, avgTotal, qps);
-    fprintf(stderr, "  context init:   %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
-            g_queryCtxInitMs, avgCtxInit, g_queryCtxInitMs/g_queryTotalMs*100);
-    fprintf(stderr, "  graph traversal:%8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
-            g_queryGraphMs, avgGraph, g_queryGraphMs/g_queryTotalMs*100);
-    fprintf(stderr, "    query KV read path:%7.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
-            g_queryKvReadMs, avgKvRead,
-            g_queryGraphMs > 0 ? g_queryKvReadMs/g_queryGraphMs*100 : 0);
-    fprintf(stderr, "      KV cursor open:%6.1f ms\n", g_queryKvCursorOpenMs);
-    fprintf(stderr, "      KV seek:       %6.1f ms\n", g_queryKvSeekMs);
-    fprintf(stderr, "      KV data:       %6.1f ms\n", g_queryKvDataMs);
-    fprintf(stderr, "      KV decode:     %6.1f ms\n", g_queryKvDecodeMs);
-    fprintf(stderr, "      KV memcpy:     %6.1f ms\n", g_queryKvMemcpyMs);
-    fprintf(stderr, "    query distance:%6.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
-            g_queryDistanceMs, avgDist,
-            g_queryGraphMs > 0 ? g_queryDistanceMs/g_queryGraphMs*100 : 0);
-    fprintf(stderr, "  result collect: %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
-            g_queryResultMs, avgResult, g_queryResultMs/g_queryTotalMs*100);
-    fprintf(stderr, "  context deinit: %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
-            g_queryCtxDeinitMs, avgCtxDeinit, g_queryCtxDeinitMs/g_queryTotalMs*100);
-    fprintf(stderr, "  LSM page compress:   %8.1f ms  (%d calls, %.1f -> %.1f MB)\n",
-            g_lsmCompressMs, g_lsmCompressCalls,
-            (double)g_lsmCompressInBytes / (1024.0 * 1024.0),
-            (double)g_lsmCompressOutBytes / (1024.0 * 1024.0));
-    fprintf(stderr, "  LSM page decompress: %8.1f ms  (%d calls, %.1f -> %.1f MB)\n",
-            g_lsmUncompressMs, g_lsmUncompressCalls,
-            (double)g_lsmUncompressInBytes / (1024.0 * 1024.0),
-            (double)g_lsmUncompressOutBytes / (1024.0 * 1024.0));
-    fprintf(stderr, "  vector search total:%5.1f ms\n", g_vectorSearchTotalMs);
-    fprintf(stderr, "    vector parse: %8.1f ms\n", g_vectorSearchParseMs);
-    fprintf(stderr, "    index lookup/open:%5.1f ms\n", g_vectorSearchLookupMs);
-    fprintf(stderr, "    diskAnn call: %8.1f ms\n", g_vectorSearchDiskAnnMs);
-    fprintf(stderr, "    vector cleanup:%7.1f ms\n", g_vectorSearchCloseMs);
-    fprintf(stderr, "================================================\n");
-  }
-}
-
-void diskAnnRecordVectorSearch(double totalMs, double parseMs, double lookupMs,
-                               double diskAnnMs, double closeMs){
-  g_vectorSearchTotalMs += totalMs;
-  g_vectorSearchParseMs += parseMs;
-  g_vectorSearchLookupMs += lookupMs;
-  g_vectorSearchDiskAnnMs += diskAnnMs;
-  g_vectorSearchCloseMs += closeMs;
-}
-
 static void diskAnnPrintInsertStats(void){
   if( g_totalInsertCount > 0 ){
-    double graphBuild = g_totalSearchMs + g_totalPass1Ms + g_totalPass2Ms + g_totalNewFlushMs;
+    double graphBuild = g_totalSearchMs + g_totalPass1Ms + g_totalPass2Ms + g_totalFlushMs;
     double graphTraversal = g_totalSearchMs;
-    double edgeUpdate = g_totalPass1Ms + g_totalPass2Ms + g_totalNewFlushMs;
+    double edgeUpdate = g_totalPass1Ms + g_totalPass2Ms + g_totalFlushMs;
     double diskAnnCoreBuild = g_totalShadowInsMs + graphBuild;
     double indexBuildTotal = g_totalIndexBuildMs > 0 ? g_totalIndexBuildMs : diskAnnCoreBuild;
     fprintf(stderr, "\n=== diskAnn insert breakdown (%d inserts) ===\n", g_totalInsertCount);
@@ -2249,10 +2104,7 @@ static void diskAnnPrintInsertStats(void){
             g_totalInsertStmtMs, g_totalInsertStmtCount);
     fprintf(stderr, "  VDBE work:         %8.1f ms\n", g_totalInsertOtherMs);
     fprintf(stderr, "  statement finish:  %8.1f ms\n", g_totalInsertFinishMs);
-    fprintf(stderr, "  KV commit total:   %8.1f ms\n", g_kvCommitTotalMs);
-    fprintf(stderr, "  KV commit LSM work:%8.1f ms\n", g_kvCommitLsmMs);
-    fprintf(stderr, "  KV commit no LSM:  %8.1f ms\n",
-            g_kvCommitTotalMs - g_kvCommitLsmMs);
+    fprintf(stderr, "  Btree commit total:%8.1f ms\n", g_btreeCommitTotalMs);
     fprintf(stderr, "  vector index build:  %8.1f ms  (%d ops)\n",
             indexBuildTotal, g_totalIndexBuildCount);
     fprintf(stderr, "    diskAnn core build:%8.1f ms\n", diskAnnCoreBuild);
@@ -2260,76 +2112,29 @@ static void diskAnnPrintInsertStats(void){
     fprintf(stderr, "    graph build/update:%8.1f ms\n", graphBuild);
     fprintf(stderr, "      build graph traversal:%7.1f ms\n", graphTraversal);
     fprintf(stderr, "      build edge update:    %7.1f ms\n", edgeUpdate);
-    fprintf(stderr, "    build KV read path:%7.1f ms\n", g_totalBuildReadMs);
-    fprintf(stderr, "    build KV write path:%6.1f ms\n", g_totalBuildWriteMs);
+    fprintf(stderr, "    build blob read path:%7.1f ms\n", g_totalBuildReadMs);
+    fprintf(stderr, "    build blob write path:%6.1f ms\n", g_totalBuildWriteMs);
     fprintf(stderr, "    build distance:%7.1f ms\n", g_totalBuildDistMs);
-    fprintf(stderr, "    LSM auto-compaction during insert: %.1f ms  (%d calls, %d pages)\n",
-            g_autoworkTotalMs, g_autoworkCalls, g_autoworkPages);
-    fprintf(stderr, "    LSM page compress:   %.1f ms  (%d calls, %.1f -> %.1f MB)\n",
-            g_lsmCompressMs, g_lsmCompressCalls,
-            (double)g_lsmCompressInBytes / (1024.0 * 1024.0),
-            (double)g_lsmCompressOutBytes / (1024.0 * 1024.0));
-    fprintf(stderr, "    LSM page decompress: %.1f ms  (%d calls, %.1f -> %.1f MB)\n",
-            g_lsmUncompressMs, g_lsmUncompressCalls,
-            (double)g_lsmUncompressInBytes / (1024.0 * 1024.0),
-            (double)g_lsmUncompressOutBytes / (1024.0 * 1024.0));
-    fprintf(stderr, "    pass2 visited nodes: %lld  (avg %.2f/insert)\n",
-            g_totalPass2Visited,
-            (double)g_totalPass2Visited / g_totalInsertCount);
-    fprintf(stderr, "    existing edge updates: %lld  (avg %.2f/insert, %.1f%% of visited)\n",
-            g_totalPass2EdgeUpdates,
-            (double)g_totalPass2EdgeUpdates / g_totalInsertCount,
-            g_totalPass2Visited > 0 ? (double)g_totalPass2EdgeUpdates / g_totalPass2Visited * 100.0 : 0.0);
-    fprintf(stderr, "    existing blob flushes: %lld  %.1f MB  (avg %.2f flushes/insert)\n",
-            g_totalExistingFlushes,
-            (double)g_totalExistingFlushBytes / (1024.0 * 1024.0),
-            (double)g_totalExistingFlushes / g_totalInsertCount);
-    fprintf(stderr, "    new blob flushes: %lld  %.1f MB\n",
-            g_totalNewFlushes,
-            (double)g_totalNewFlushBytes / (1024.0 * 1024.0));
+    fprintf(stderr, "    LSM work during build: 0.0 ms\n");
     fprintf(stderr, "================================================\n");
   }
 }
 
 void diskAnnCloseIndex(DiskAnnIndex *pIndex){
-  if( pIndex->totalSearchMs > 0 || pIndex->totalShadowInsMs > 0
-   || pIndex->totalPass1Ms > 0 || pIndex->totalPass2Ms > 0
-   || pIndex->totalNewFlushMs > 0 ){
-    g_totalSearchMs += pIndex->totalSearchMs;
-    g_totalShadowInsMs += pIndex->totalShadowInsMs;
-    g_totalPass1Ms += pIndex->totalPass1Ms;
-    g_totalPass2Ms += pIndex->totalPass2Ms;
-    g_totalNewFlushMs += pIndex->totalNewFlushMs;
-    g_totalBuildReadMs += pIndex->totalBuildReadMs;
-    g_totalBuildWriteMs += pIndex->totalBuildWriteMs;
-    g_totalBuildDistMs += pIndex->totalBuildDistMs;
-    g_totalBuildLsmMs += pIndex->totalBuildLsmMs;
-    g_totalPass2Visited += pIndex->totalPass2Visited;
-    g_totalPass2EdgeUpdates += pIndex->totalPass2EdgeUpdates;
-    g_totalExistingFlushes += pIndex->totalExistingFlushes;
-    g_totalExistingFlushBytes += pIndex->totalExistingFlushBytes;
-    g_totalNewFlushes += pIndex->totalNewFlushes;
-    g_totalNewFlushBytes += pIndex->totalNewFlushBytes;
-    g_totalInsertCount++;
-  }
   if( !g_atexitRegistered ){
     atexit(diskAnnPrintInsertStats);
     atexit(diskAnnPrintSearchStats);
     g_atexitRegistered = 1;
   }
   if( pIndex->zDbSName ){
-    sqlite4DbFree(pIndex->db, pIndex->zDbSName);
+    sqlite3DbFree(pIndex->db, pIndex->zDbSName);
   }
   if( pIndex->zName ){
-    sqlite4DbFree(pIndex->db, pIndex->zName);
+    sqlite3DbFree(pIndex->db, pIndex->zName);
   }
   if( pIndex->zShadow ){
-    sqlite4DbFree(pIndex->db, pIndex->zShadow);
+    sqlite3DbFree(pIndex->db, pIndex->zShadow);
   }
-  if( pIndex->pReadCsr ){
-    sqlite4KVCursorClose(pIndex->pReadCsr);
-  }
-  sqlite4DbFree(pIndex->db, pIndex);
+  sqlite3DbFree(pIndex->db, pIndex);
 }
-
-#endif /* !defined(SQLITE4_OMIT_VECTOR) */
+#endif /* !defined(SQLITE_OMIT_VECTOR) */
