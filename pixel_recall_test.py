@@ -376,9 +376,17 @@ def split_schema_inserts(sql_text):
     return schema, inserts, pragmas
 
 
-def build_schema_sql(schema_lines, page_size_kb):
-    pragma = f"PRAGMA page_size={page_size_kb * 1024};"
-    return "\n".join([pragma] + schema_lines)
+def build_schema_sql(schema_lines, page_size_kb, is_sqlite3=False, checkpoint_kb=None):
+    pragmas = []
+    if page_size_kb is not None:
+        pragmas.append(f"PRAGMA page_size={page_size_kb * 1024};")
+    if checkpoint_kb is not None:
+        if is_sqlite3:
+            pages = max(1, checkpoint_kb // page_size_kb)
+            pragmas.append(f"PRAGMA wal_autocheckpoint={pages};")
+        else:
+            pragmas.append(f"PRAGMA lsm_autocheckpoint={checkpoint_kb};")
+    return "\n".join(pragmas + list(schema_lines))
 
 
 def build_db_target(db_path, is_sqlite3=False, page_size_kb=None):
@@ -476,7 +484,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                    gt_results, k, device_db_dir, serial=None,
                    is_sqlite3=False, auto_compact=False,
                    do_drop_cache=False, internal_io_timing=False, io_log_dir=None,
-                   page_size_kb=None, disk_device=DISK_DEVICE,
+                   page_size_kb=None, checkpoint_kb=None, disk_device=DISK_DEVICE,
                    device_tmp_dir="/data/local/tmp", shell_timeout=20000):
     db_path   = f"{device_db_dir}/bench_{label}.db"
     db_target = build_db_target(db_path, is_sqlite3=is_sqlite3, page_size_kb=page_size_kb)
@@ -492,6 +500,12 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     print(f"  Shell:  {shell}")
     if not is_sqlite3 and page_size_kb is not None:
         print(f"  DB:     {db_target}")
+    if checkpoint_kb is not None:
+        if is_sqlite3:
+            pages = max(1, checkpoint_kb // (page_size_kb or 4))
+            print(f"  Checkpoint: WAL wal_autocheckpoint={pages} pages ({checkpoint_kb} KB)")
+        else:
+            print(f"  Checkpoint: LSM lsm_autocheckpoint={checkpoint_kb} KB")
     if need_compact:
         print(f"  Compact:{compact_bin}")
     print(f"{'='*60}")
@@ -501,13 +515,26 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
 
     # ── [1] Schema (not timed) ──
     print(f"  [1/{n_phases}] Schema + Insert...")
-    schema_sql = build_schema_sql(schema_lines, page_size_kb) if page_size_kb else "\n".join(schema_lines)
+    if page_size_kb is not None or checkpoint_kb is not None:
+        schema_sql = build_schema_sql(schema_lines, page_size_kb,
+                                      is_sqlite3=is_sqlite3, checkpoint_kb=checkpoint_kb)
+    else:
+        schema_sql = "\n".join(schema_lines)
     run_shell(shell, db_target, schema_sql,
               serial=serial, env_vars=env_vars, device_tmp_dir=device_tmp_dir,
               timeout=shell_timeout)
 
     # ── Insert (timed) ──
-    insert_sql_with_pragmas = "\n".join(pragma_lines + insert_lines)
+    # lsm_autocheckpoint / wal_autocheckpoint are per-connection settings; re-apply
+    # them here because each run_shell call opens a new process (new connection).
+    ckpt_pragmas = []
+    if checkpoint_kb is not None:
+        if is_sqlite3:
+            pages = max(1, checkpoint_kb // (page_size_kb or 4))
+            ckpt_pragmas.append(f"PRAGMA wal_autocheckpoint={pages};")
+        else:
+            ckpt_pragmas.append(f"PRAGMA lsm_autocheckpoint={checkpoint_kb};")
+    insert_sql_with_pragmas = "\n".join(ckpt_pragmas + pragma_lines + insert_lines)
     device_insert_sql = push_sql(insert_sql_with_pragmas, serial=serial, device_tmp_dir=device_tmp_dir)
     drop_caches(serial=serial, enabled=do_drop_cache)
     insert_log = os.path.join(io_log_dir, f"{label}_insert_io.csv") if io_log_dir else None
@@ -662,6 +689,10 @@ def main():
     parser.add_argument("--device-tmp-dir", type=str, default="/data/local/tmp",
                         help="Device directory for temporary SQL files")
     parser.add_argument("--page-sizes",   type=str, default="4,16,32,64")
+    parser.add_argument("--checkpoint-sizes-kb", type=str, default="0",
+                        help="Comma-separated autocheckpoint sizes in KB (0 = system default). "
+                             "For WAL, pages = checkpoint_kb // page_size_kb. "
+                             "e.g. --checkpoint-sizes-kb 512,2048,4096,16384,65536")
     parser.add_argument("--auto-compact", type=int, default=1, choices=[0, 1],
                         help="0: run compact_db after insert (autowork=0), "
                              "1: skip compact_db (autowork=1 handles it)")
@@ -680,9 +711,10 @@ def main():
                              "(e.g. /data/backups/recall); runs outside all measurement phases")
     args = parser.parse_args()
 
-    serial        = args.adb_serial
-    page_sizes_kb = [int(x) for x in args.page_sizes.split(",")]
-    dataset_names = [x.strip() for x in args.datasets.split(",")]
+    serial             = args.adb_serial
+    page_sizes_kb      = [int(x) for x in args.page_sizes.split(",")]
+    checkpoint_sizes_kb = [int(x) for x in args.checkpoint_sizes_kb.split(",")]
+    dataset_names      = [x.strip() for x in args.datasets.split(",")]
 
     # Validate local dataset files
     datasets = []
@@ -712,7 +744,10 @@ def main():
             r2 = adb_shell(f"test -x {compact_bin} && echo OK", serial=serial)
             cb = compact_bin if "OK" in r2.stdout else None
             for ps_kb in page_sizes_kb:
-                configs.append((f"lsm_{ps_kb}kb", shell_bin, cb, False, ps_kb))
+                for ckpt_kb in checkpoint_sizes_kb:
+                    ckpt_suffix = f"_ckpt{ckpt_kb}kb" if ckpt_kb > 0 else ""
+                    effective_ckpt = ckpt_kb if ckpt_kb > 0 else None
+                    configs.append((f"lsm_{ps_kb}kb{ckpt_suffix}", shell_bin, cb, False, ps_kb, effective_ckpt))
 
     if args.sqlite3_dir:
         shell_bin = f"{args.sqlite3_dir}/sqlite3"
@@ -721,7 +756,10 @@ def main():
             print(f"Warning: {shell_bin} not found on device, skipping sqlite3 configs")
         else:
             for ps_kb in page_sizes_kb:
-                configs.append((f"sqlite3_{ps_kb}kb", shell_bin, None, True, ps_kb))
+                for ckpt_kb in checkpoint_sizes_kb:
+                    ckpt_suffix = f"_ckpt{ckpt_kb}kb" if ckpt_kb > 0 else ""
+                    effective_ckpt = ckpt_kb if ckpt_kb > 0 else None
+                    configs.append((f"sqlite3_{ps_kb}kb{ckpt_suffix}", shell_bin, None, True, ps_kb, effective_ckpt))
 
     if not configs:
         print("Error: no valid configurations found.")
@@ -749,7 +787,7 @@ def main():
         print(f"  Loaded {len(gt_results)} groundtruth queries")
 
         ds_results = []
-        for label, shell, compact_bin, is_s3, ps_kb in configs:
+        for label, shell, compact_bin, is_s3, ps_kb, ckpt_kb in configs:
             run_label = f"{ds_name}_{label}"
             result = run_one_config(
                 run_label, shell, compact_bin, insert_sql, query_sql,
@@ -758,6 +796,7 @@ def main():
                 do_drop_cache=args.drop_cache,
                 internal_io_timing=bool(args.internal_io_timing),
                 io_log_dir=args.io_log_dir, page_size_kb=ps_kb,
+                checkpoint_kb=ckpt_kb,
                 disk_device=args.disk_device, device_tmp_dir=args.device_tmp_dir,
                 shell_timeout=args.shell_timeout
             )

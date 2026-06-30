@@ -1,4 +1,5 @@
 dataset/*
 .DS_Store
 *.log
-*.csv
+*.csv__pycache__/
+*.pyc

@@ -465,7 +465,7 @@ static void kvlsmPragma(sqlite4_context *ctx, int nArg, sqlite4_value **apArg){
     }
 
     case KVLSM_LSM_CONFIG: {
-      int iVal = 0;
+      int iVal = -1;  /* -1 signals read-only; lsm_config skips set if *piVal<0 */
       if( nArg>1 ) goto wrong_num_args;
       if( nArg==1 ){
         iVal = sqlite4_value_int(apArg[0]);
@@ -525,7 +525,9 @@ static int kvlsmGetMethod(
     ePragma = KVLSM_LSM_CHECKPOINT;
   }else{
     for(i=0; i<ArraySize(aConfigPragma); i++){
-      if( 0==sqlite4_strnicmp(zMethod, aConfigPragma[i].zName, -1) ){
+      int nName = (int)strlen(aConfigPragma[i].zName);
+      if( (int)strlen(zMethod)==nName
+       && 0==sqlite4_strnicmp(zMethod, aConfigPragma[i].zName, nName) ){
         ePragma = KVLSM_LSM_CONFIG;
         eConfig = aConfigPragma[i].eConfig;
         break;

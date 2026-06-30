@@ -63,24 +63,37 @@ int main(int argc, char **argv){
 
   fprintf(stderr, "Phase 1 done. Total: %d KB written.\n", nTotal);
 
-  /* Phase 2: Compact to single segment with nMerge=1.
-  ** This is required before lsm_reclaim can safely move blocks,
-  ** because the redirect array is shared across ALL segments. */
-  if( rc == 0 ){
-    fprintf(stderr, "Phase 2: compact to single segment\n");
-    nTotal = 0;
-    do {
-      rc = lsm_work(pDb, 1, 4096, &nWritten);
-      if( rc != 0 ){
-        fprintf(stderr, "lsm_work(nMerge=1) failed: %d\n", rc);
-        break;
+  /* Phase 2: Gradually reduce nMerge from 3 down to 1.
+  ** Jumping straight to nMerge=1 on a DB with many segments can cause
+  ** a single lsm_work call to spin CPU indefinitely. Stepping down
+  ** through nMerge=3,2,1 reduces the fan-in at each stage and avoids
+  ** that pathological case. */
+  {
+    int nMerge;
+    for( nMerge = 3; nMerge >= 1 && rc == 0; nMerge-- ){
+      fprintf(stderr, "Phase 2 (nMerge=%d)\n", nMerge);
+      nTotal = 0;
+      do {
+        rc = lsm_work(pDb, nMerge, 4096, &nWritten);
+        if( rc != 0 ){
+          fprintf(stderr, "lsm_work(nMerge=%d) failed: %d\n", nMerge, rc);
+          break;
+        }
+        nTotal += nWritten;
+        if( nWritten > 0 ){
+          fprintf(stderr, "  %d KB written so far\n", nTotal);
+        }
+      } while( nWritten > 0 );
+      fprintf(stderr, "Phase 2 (nMerge=%d) done. Total: %d KB written.\n", nMerge, nTotal);
+
+      /* Show structure after each sub-phase */
+      {
+        char *zInfo = 0;
+        lsm_info(pDb, LSM_INFO_DB_STRUCTURE, &zInfo);
+        fprintf(stderr, "Structure: %s\n", zInfo ? zInfo : "(null)");
+        lsm_free(pEnv, zInfo);
       }
-      nTotal += nWritten;
-      if( nWritten > 0 ){
-        fprintf(stderr, "  %d KB written so far\n", nTotal);
-      }
-    } while( nWritten > 0 );
-    fprintf(stderr, "Phase 2 done. Total: %d KB written.\n", nTotal);
+    }
   }
 
   /* Show DB structure after merge */

@@ -44,12 +44,12 @@
 */
 #define LSM_DFLT_PAGE_SIZE          (4 * 1024)
 #define LSM_DFLT_BLOCK_SIZE         (1 * 1024 * 1024)
-#define LSM_DFLT_AUTOFLUSH          (1 * 1024 * 1024)
+#define LSM_DFLT_AUTOFLUSH          (256 * 1024 * 1024)
 #define LSM_DFLT_AUTOCHECKPOINT     (i64)(2 * 1024 * 1024)
 #define LSM_DFLT_AUTOWORK           1
 #define LSM_DFLT_LOG_SIZE           (128*1024)
 #define LSM_DFLT_AUTOMERGE          4
-#define LSM_DFLT_SAFETY             LSM_SAFETY_FULL
+#define LSM_DFLT_SAFETY             LSM_SAFETY_NORMAL
 #define LSM_DFLT_MMAP               (LSM_IS_64_BIT ? 1 : 32768)
 #define LSM_DFLT_MULTIPLE_PROCESSES 1
 #define LSM_DFLT_USE_LOG            1
