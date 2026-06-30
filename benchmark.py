@@ -576,6 +576,10 @@ def parse_diskann_stats(stderr_text):
     grab(r'KV data:\s*([\d.]+)\s+ms', 'kv_data_ms')
     grab(r'KV decode:\s*([\d.]+)\s+ms', 'kv_decode_ms')
     grab(r'KV memcpy:\s*([\d.]+)\s+ms', 'kv_memcpy_ms')
+    grab(r'search visited nodes:\s*(\d+)', 'search_visited_nodes', int)
+    grab(r'search edges examined:\s*(\d+)', 'search_edges_examined', int)
+    grab(r'blob node reads:\s*(\d+)', 'query_node_reads', int)
+    grab(r'KV node reads:\s*(\d+)', 'query_node_reads', int)
     grab(r'query distance:\s*([\d.]+)\s+ms', 'query_dist_ms')
     grab(r'result collect:\s*([\d.]+)\s+ms', 'result_ms')
     grab(r'context deinit:\s*([\d.]+)\s+ms', 'ctx_deinit_ms')
@@ -854,6 +858,18 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                 f"KVDecode={q_stats.get('kv_decode_ms', 0):.0f}ms  "
                 f"KVMemcpy={q_stats.get('kv_memcpy_ms', 0):.0f}ms"
             )
+        if q_stats.get('search_visited_nodes') or q_stats.get('query_node_reads'):
+            visited = q_stats.get('search_visited_nodes', 0)
+            edges = q_stats.get('search_edges_examined', 0)
+            reads = q_stats.get('query_node_reads', 0)
+            print(
+                f"        SearchVisited={visited}  "
+                f"NodeReads={reads}  "
+                f"EdgesExamined={edges}  "
+                f"AvgVisited/Q={visited / q if q else 0:.2f}  "
+                f"AvgEdges/Visited={edges / visited if visited else 0:.2f}  "
+                f"AvgReads/Visited={reads / visited if visited else 0:.2f}"
+            )
         if q_stats.get('vector_search_total_ms'):
             print(
                 f"        VecSearch={q_stats.get('vector_search_total_ms', 0):.0f}ms  "
@@ -1078,7 +1094,7 @@ def main():
             short_label = r['label'].replace(f"{ds_name}_", "")
             ist = r.get('ins_stats', {})
             stmt_s = ist.get('insert_stmt_total_ms', 0) / 1000
-            finish_s = ist.get(
+            commit_base_s = ist.get(
                 'insert_kv_commit_no_lsm_ms',
                 ist.get(
                     'insert_btree_commit_total_ms',
@@ -1088,15 +1104,19 @@ def main():
             wal_s = ist.get('step_wal_ms', 0) / 1000
             build_s = ist.get('build_total_ms', 0) / 1000
             shadow_s = ist.get('shadow_insert_ms', 0) / 1000
-            traversal_s = ist.get('build_traversal_ms', 0) / 1000
-            edge_update_s = ist.get('build_edge_update_ms', 0) / 1000
+            build_write_s = ist.get('build_write_ms', 0) / 1000
             dist_s = ist.get('build_dist_ms', 0) / 1000
+            commit_s = commit_base_s + build_write_s
+            traversal_s = build_s - dist_s - build_write_s
+            if traversal_s < 0:
+                traversal_s = 0
+            edge_update_s = ist.get('build_edge_update_ms', 0) / 1000
             lsm_compact_s = ist.get('insert_lsm_compact_ms', 0) / 1000
             pg_comp_s = ist.get('lsm_page_compress_ms', 0) / 1000
             pg_decomp_s = ist.get('lsm_page_decompress_ms', 0) / 1000
             qst = r.get('q_stats', {})
             ins_vals = (f"{r['insert_time_s']:>8.1f} "
-                        f"{stmt_s:>8.1f} {finish_s:>8.1f} {wal_s:>8.1f} "
+                        f"{stmt_s:>8.1f} {commit_s:>8.1f} {wal_s:>8.1f} "
                         f"{build_s:>8.1f} "
                         f"{shadow_s:>8.1f} {traversal_s:>8.1f} {edge_update_s:>8.1f} "
                         f"{dist_s:>8.1f} {lsm_compact_s:>8.1f} "

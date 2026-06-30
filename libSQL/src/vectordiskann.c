@@ -2049,6 +2049,17 @@ static void diskAnnPrintSearchStats(void){
     fprintf(stderr, "      blob reopen: %8.1f ms\n", g_queryBlobReopenMs);
     fprintf(stderr, "      blob read:   %8.1f ms  (cache hit/miss %d/%d)\n",
             g_queryBlobReadCallMs, g_queryBlobCacheHits, g_queryBlobCacheMisses);
+    fprintf(stderr, "    search visited nodes: %d  (avg %.2f/q)\n",
+            g_queryNodesVisited,
+            (double)g_queryNodesVisited / g_queryCount);
+    fprintf(stderr, "    search edges examined: %lld  (avg %.2f/q, %.2f/visited)\n",
+            g_queryEdgesExamined,
+            (double)g_queryEdgesExamined / g_queryCount,
+            g_queryNodesVisited > 0 ? (double)g_queryEdgesExamined / g_queryNodesVisited : 0.0);
+    fprintf(stderr, "    blob node reads: %d  (avg %.2f/q, %.2f/visited)\n",
+            g_queryBlobReads,
+            (double)g_queryBlobReads / g_queryCount,
+            g_queryNodesVisited > 0 ? (double)g_queryBlobReads / g_queryNodesVisited : 0.0);
     fprintf(stderr, "    query distance:%6.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
             g_queryDistanceMs, avgDist,
             g_queryGraphMs > 0 ? g_queryDistanceMs/g_queryGraphMs*100 : 0);

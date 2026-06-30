@@ -2204,6 +2204,17 @@ static void diskAnnPrintSearchStats(void){
     fprintf(stderr, "      KV data:       %6.1f ms\n", g_queryKvDataMs);
     fprintf(stderr, "      KV decode:     %6.1f ms\n", g_queryKvDecodeMs);
     fprintf(stderr, "      KV memcpy:     %6.1f ms\n", g_queryKvMemcpyMs);
+    fprintf(stderr, "    search visited nodes: %d  (avg %.2f/q)\n",
+            g_queryNodesVisited,
+            (double)g_queryNodesVisited / g_queryCount);
+    fprintf(stderr, "    search edges examined: %lld  (avg %.2f/q, %.2f/visited)\n",
+            g_queryEdgesExamined,
+            (double)g_queryEdgesExamined / g_queryCount,
+            g_queryNodesVisited > 0 ? (double)g_queryEdgesExamined / g_queryNodesVisited : 0.0);
+    fprintf(stderr, "    KV node reads: %d  (avg %.2f/q, %.2f/visited)\n",
+            g_queryKvReads,
+            (double)g_queryKvReads / g_queryCount,
+            g_queryNodesVisited > 0 ? (double)g_queryKvReads / g_queryNodesVisited : 0.0);
     fprintf(stderr, "    query distance:%6.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
             g_queryDistanceMs, avgDist,
             g_queryGraphMs > 0 ? g_queryDistanceMs/g_queryGraphMs*100 : 0);
