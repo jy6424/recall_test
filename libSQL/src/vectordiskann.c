@@ -101,6 +101,13 @@ static int g_queryBlobReads;
 static int g_queryNodesVisited;
 static long long g_queryEdgesExamined;
 static double g_queryDistanceMs;
+static double g_queryCandidateSelectMs;
+static double g_queryNodeParseMs;
+static double g_queryMarkVisitedMs;
+static double g_queryEdgeDecodeMs;
+static double g_queryEdgeLookupMs;
+static double g_queryCandidateEvalMs;
+static double g_queryCandidateInsertMs;
 static double g_vectorSearchTotalMs;
 static double g_vectorSearchParseMs;
 static double g_vectorSearchLookupMs;
@@ -1422,6 +1429,8 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
   Vector startVector;
   float startDistance;
   int rc, i, nVisited = 0;
+  int doSearchTiming = (pCtx->blobMode == DISKANN_BLOB_READONLY && diskAnnIoTimingEnabled());
+  struct timespec _to0, _to1;
 
   start = diskAnnNodeAlloc(pIndex, nStartRowid);
   if( start == NULL ){
@@ -1442,7 +1451,12 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
     goto out;
   }
 
+  if( doSearchTiming ) clock_gettime(CLOCK_MONOTONIC, &_to0);
   nodeBinVector(pIndex, start->pBlobSpot, &startVector);
+  if( doSearchTiming ){
+    clock_gettime(CLOCK_MONOTONIC, &_to1);
+    g_queryNodeParseMs += diskAnnMsBetween(&_to0, &_to1);
+  }
   startDistance = diskAnnVectorDistance(pIndex, pCtx->query.pNode, &startVector);
 
   if( pCtx->blobMode == DISKANN_BLOB_READONLY ){
@@ -1452,7 +1466,12 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
   }
   // we are transferring ownership of start node to the DiskAnnSearchCtx - so we no longer need to clean up anything in this function
   // (caller must take care of DiskAnnSearchCtx resource reclamation)
+  if( doSearchTiming ) clock_gettime(CLOCK_MONOTONIC, &_to0);
   diskAnnSearchCtxInsertCandidate(pCtx, 0, start, startDistance);
+  if( doSearchTiming ){
+    clock_gettime(CLOCK_MONOTONIC, &_to1);
+    g_queryCandidateInsertMs += diskAnnMsBetween(&_to0, &_to1);
+  }
   start = NULL;
 
   while( diskAnnSearchCtxHasUnvisited(pCtx) ){
@@ -1461,8 +1480,14 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
     DiskAnnNode *pCandidate;
     BlobSpot *pCandidateBlob;
     float distance;
-    int iCandidate = diskAnnSearchCtxFindClosestCandidateIdx(pCtx);
+    int iCandidate;
+    if( doSearchTiming ) clock_gettime(CLOCK_MONOTONIC, &_to0);
+    iCandidate = diskAnnSearchCtxFindClosestCandidateIdx(pCtx);
     diskAnnSearchCtxGetCandidate(pCtx, iCandidate, &pCandidate, &distance);
+    if( doSearchTiming ){
+      clock_gettime(CLOCK_MONOTONIC, &_to1);
+      g_queryCandidateSelectMs += diskAnnMsBetween(&_to0, &_to1);
+    }
 
     rc = SQLITE_OK;
     if( pReusableBlobSpot != NULL ){
@@ -1493,8 +1518,13 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
     nVisited += 1;
     g_searchVisitedTotal++;
     DiskAnnTrace(("visiting candidate(%d): id=%lld\n", nVisited, pCandidate->nRowid));
+    if( doSearchTiming ) clock_gettime(CLOCK_MONOTONIC, &_to0);
     nodeBinVector(pIndex, pCandidateBlob, &vCandidate);
     nEdges = nodeBinEdges(pIndex, pCandidateBlob);
+    if( doSearchTiming ){
+      clock_gettime(CLOCK_MONOTONIC, &_to1);
+      g_queryNodeParseMs += diskAnnMsBetween(&_to0, &_to1);
+    }
     g_searchEdgesTotal += nEdges;
 
     // if pNodeQuery != pEdgeQuery then distance from aDistances is approximate and we must recalculate it
@@ -1502,7 +1532,12 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
       distance = diskAnnVectorDistance(pIndex, &vCandidate, pCtx->query.pNode);
     }
 
+    if( doSearchTiming ) clock_gettime(CLOCK_MONOTONIC, &_to0);
     diskAnnSearchCtxMarkVisited(pCtx, pCandidate, distance);
+    if( doSearchTiming ){
+      clock_gettime(CLOCK_MONOTONIC, &_to1);
+      g_queryMarkVisitedMs += diskAnnMsBetween(&_to0, &_to1);
+    }
 
     for(i = 0; i < nEdges; i++){
       u64 edgeRowid;
@@ -1510,18 +1545,40 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
       float edgeDistance;
       int iInsert;
       DiskAnnNode *pNewCandidate;
+      int isKnown;
+      if( doSearchTiming ) clock_gettime(CLOCK_MONOTONIC, &_to0);
       nodeBinEdge(pIndex, pCandidateBlob, i, &edgeRowid, NULL, &edgeVector);
-      if( diskAnnSearchCtxIsVisited(pCtx, edgeRowid) || diskAnnSearchCtxHasCandidate(pCtx, edgeRowid) ){
+      if( doSearchTiming ){
+        clock_gettime(CLOCK_MONOTONIC, &_to1);
+        g_queryEdgeDecodeMs += diskAnnMsBetween(&_to0, &_to1);
+      }
+      if( doSearchTiming ) clock_gettime(CLOCK_MONOTONIC, &_to0);
+      isKnown = diskAnnSearchCtxIsVisited(pCtx, edgeRowid) || diskAnnSearchCtxHasCandidate(pCtx, edgeRowid);
+      if( doSearchTiming ){
+        clock_gettime(CLOCK_MONOTONIC, &_to1);
+        g_queryEdgeLookupMs += diskAnnMsBetween(&_to0, &_to1);
+      }
+      if( isKnown ){
         continue;
       }
 
       edgeDistance = diskAnnVectorDistance(pIndex, pCtx->query.pEdge, &edgeVector);
+      if( doSearchTiming ) clock_gettime(CLOCK_MONOTONIC, &_to0);
       iInsert = diskAnnSearchCtxShouldAddCandidate(pIndex, pCtx, edgeDistance);
+      if( doSearchTiming ){
+        clock_gettime(CLOCK_MONOTONIC, &_to1);
+        g_queryCandidateEvalMs += diskAnnMsBetween(&_to0, &_to1);
+      }
       if( iInsert < 0 ){
         continue;
       }
+      if( doSearchTiming ) clock_gettime(CLOCK_MONOTONIC, &_to0);
       pNewCandidate = diskAnnNodeAlloc(pIndex, edgeRowid);
       if( pNewCandidate == NULL ){
+        if( doSearchTiming ){
+          clock_gettime(CLOCK_MONOTONIC, &_to1);
+          g_queryCandidateInsertMs += diskAnnMsBetween(&_to0, &_to1);
+        }
         continue;
       }
       DiskAnnTrace(("want to insert new candidate %lld at position %d with distance %f\n", edgeRowid, iInsert, edgeDistance));
@@ -1529,6 +1586,10 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
       // this way we fully postpone blob loading until we will really visit the candidate
       // (and this is not always the case since other better candidate can excommunicate this candidate)
       diskAnnSearchCtxInsertCandidate(pCtx, iInsert, pNewCandidate, edgeDistance);
+      if( doSearchTiming ){
+        clock_gettime(CLOCK_MONOTONIC, &_to1);
+        g_queryCandidateInsertMs += diskAnnMsBetween(&_to0, &_to1);
+      }
     }
   }
   DiskAnnTrace(("diskAnnSearchInternal: search context in the end\n", nStartRowid));
@@ -2063,6 +2124,14 @@ static void diskAnnPrintSearchStats(void){
     fprintf(stderr, "    query distance:%6.1f ms  (avg %.3f ms/q, %5.1f%% of graph)\n",
             g_queryDistanceMs, avgDist,
             g_queryGraphMs > 0 ? g_queryDistanceMs/g_queryGraphMs*100 : 0);
+    fprintf(stderr, "    traversal detail:\n");
+    fprintf(stderr, "      candidate select:%7.1f ms\n", g_queryCandidateSelectMs);
+    fprintf(stderr, "      node parse:      %7.1f ms\n", g_queryNodeParseMs);
+    fprintf(stderr, "      mark visited:    %7.1f ms\n", g_queryMarkVisitedMs);
+    fprintf(stderr, "      edge decode:     %7.1f ms\n", g_queryEdgeDecodeMs);
+    fprintf(stderr, "      edge lookup:     %7.1f ms\n", g_queryEdgeLookupMs);
+    fprintf(stderr, "      candidate eval:  %7.1f ms\n", g_queryCandidateEvalMs);
+    fprintf(stderr, "      candidate insert:%7.1f ms\n", g_queryCandidateInsertMs);
     fprintf(stderr, "  result collect: %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",
             g_queryResultMs, avgResult, g_queryResultMs/g_queryTotalMs*100);
     fprintf(stderr, "  context deinit: %8.1f ms  (avg %.3f ms/q, %5.1f%%)\n",

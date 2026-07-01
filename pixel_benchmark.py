@@ -466,6 +466,13 @@ def parse_diskann_stats(stderr_text):
     grab(r'KV decode:\s*([\d.]+)\s+ms',               'kv_decode_ms')
     grab(r'KV memcpy:\s*([\d.]+)\s+ms',               'kv_memcpy_ms')
     grab(r'query distance:\s*([\d.]+)\s+ms',          'query_dist_ms')
+    grab(r'candidate select:\s*([\d.]+)\s+ms',        'query_candidate_select_ms')
+    grab(r'node parse:\s*([\d.]+)\s+ms',              'query_node_parse_ms')
+    grab(r'mark visited:\s*([\d.]+)\s+ms',            'query_mark_visited_ms')
+    grab(r'edge decode:\s*([\d.]+)\s+ms',             'query_edge_decode_ms')
+    grab(r'edge lookup:\s*([\d.]+)\s+ms',             'query_edge_lookup_ms')
+    grab(r'candidate eval:\s*([\d.]+)\s+ms',          'query_candidate_eval_ms')
+    grab(r'candidate insert:\s*([\d.]+)\s+ms',        'query_candidate_insert_ms')
     grab(r'result collect:\s*([\d.]+)\s+ms',          'result_ms')
     grab(r'context deinit:\s*([\d.]+)\s+ms',          'ctx_deinit_ms')
     grab(r'search visited nodes:\s*(\d+)',            'search_visited_nodes', int)
@@ -742,6 +749,17 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
             print(
                 f"        PgComp={q_stats.get('lsm_page_compress_ms',0):.0f}ms  "
                 f"PgDecomp={q_stats.get('lsm_page_decompress_ms',0):.0f}ms"
+            )
+        if q_stats.get('query_candidate_select_ms') is not None:
+            print(
+                f"        TravDetail: "
+                f"CandSel={q_stats.get('query_candidate_select_ms', 0):.0f}ms  "
+                f"NodeParse={q_stats.get('query_node_parse_ms', 0):.0f}ms  "
+                f"Mark={q_stats.get('query_mark_visited_ms', 0):.0f}ms  "
+                f"EdgeDecode={q_stats.get('query_edge_decode_ms', 0):.0f}ms  "
+                f"EdgeLookup={q_stats.get('query_edge_lookup_ms', 0):.0f}ms  "
+                f"CandEval={q_stats.get('query_candidate_eval_ms', 0):.0f}ms  "
+                f"CandInsert={q_stats.get('query_candidate_insert_ms', 0):.0f}ms"
             )
     print(f"        {format_io_summary(result['query_disk_io'])}")
     for block in extract_c_stat_blocks(q_err):
