@@ -481,6 +481,18 @@ def load_groundtruth(path):
     return results
 
 
+def display_config_label(label):
+    label = re.sub(r'(^|_)lsm_\d+kb(?=$|_)', r'\1LSMoVe', label)
+    label = re.sub(r'(^|_)sqlite3_\d+kb(?=$|_)', r'\1libSQL', label)
+    return label
+
+
+def config_label(name, page_size_kb, include_page_size=False):
+    if include_page_size:
+        return f"{name}_{page_size_kb}kb"
+    return name
+
+
 def file_size_mb(path):
     try:
         return os.path.getsize(path) / (1024 * 1024)
@@ -581,6 +593,13 @@ def parse_diskann_stats(stderr_text):
     grab(r'blob node reads:\s*(\d+)', 'query_node_reads', int)
     grab(r'KV node reads:\s*(\d+)', 'query_node_reads', int)
     grab(r'query distance:\s*([\d.]+)\s+ms', 'query_dist_ms')
+    grab(r'candidate select:\s*([\d.]+)\s+ms', 'query_candidate_select_ms')
+    grab(r'node parse:\s*([\d.]+)\s+ms', 'query_node_parse_ms')
+    grab(r'mark visited:\s*([\d.]+)\s+ms', 'query_mark_visited_ms')
+    grab(r'edge decode:\s*([\d.]+)\s+ms', 'query_edge_decode_ms')
+    grab(r'edge lookup:\s*([\d.]+)\s+ms', 'query_edge_lookup_ms')
+    grab(r'candidate eval:\s*([\d.]+)\s+ms', 'query_candidate_eval_ms')
+    grab(r'candidate insert:\s*([\d.]+)\s+ms', 'query_candidate_insert_ms')
     grab(r'result collect:\s*([\d.]+)\s+ms', 'result_ms')
     grab(r'context deinit:\s*([\d.]+)\s+ms', 'ctx_deinit_ms')
     grab(r'vector search total:\s*([\d.]+)\s+ms', 'vector_search_total_ms')
@@ -661,7 +680,7 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
     n_phases = 2 if search_only else (4 if need_compact else 3)
 
     print(f"\n{'='*60}")
-    print(f"  Config: {label}")
+    print(f"  Config: {display_config_label(label)}")
     print(f"  Shell:   {shell}")
     if not is_sqlite3 and page_size_kb is not None:
         print(f"  DB open: {db_target}")
@@ -878,6 +897,17 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                 f"DiskAnnCall={q_stats.get('diskann_call_ms', 0):.0f}ms  "
                 f"VecCleanup={q_stats.get('vector_cleanup_ms', 0):.0f}ms"
             )
+        if q_stats.get('query_candidate_select_ms') is not None:
+            print(
+                f"        TravDetail: "
+                f"CandSel={q_stats.get('query_candidate_select_ms', 0):.0f}ms  "
+                f"NodeParse={q_stats.get('query_node_parse_ms', 0):.0f}ms  "
+                f"Mark={q_stats.get('query_mark_visited_ms', 0):.0f}ms  "
+                f"EdgeDecode={q_stats.get('query_edge_decode_ms', 0):.0f}ms  "
+                f"EdgeLookup={q_stats.get('query_edge_lookup_ms', 0):.0f}ms  "
+                f"CandEval={q_stats.get('query_candidate_eval_ms', 0):.0f}ms  "
+                f"CandInsert={q_stats.get('query_candidate_insert_ms', 0):.0f}ms"
+            )
         if q_stats.get('lsm_page_compress_ms') or q_stats.get('lsm_page_decompress_ms'):
             print(
                 f"        PgComp={q_stats.get('lsm_page_compress_ms', 0):.0f}ms  "
@@ -964,6 +994,7 @@ def main():
         return 1
 
     use_compaction = bool(args.lsm_use_compaction)
+    include_page_size_in_label = len(page_sizes_kb) > 1
 
     # Build configs: (label, shell, compact_bin_or_None, is_sqlite3, page_size_kb)
     configs = []
@@ -978,7 +1009,8 @@ def main():
                 print("Warning: compact_db unavailable, skipping LSMoVe configs")
             else:
                 for ps_kb in page_sizes_kb:
-                    configs.append((f"lsm_{ps_kb}kb", shell, compact_bin, False, ps_kb))
+                    label = config_label("LSMoVe", ps_kb, include_page_size_in_label)
+                    configs.append((label, shell, compact_bin, False, ps_kb))
 
     if args.sqlite3_dir:
         shell = os.path.join(args.sqlite3_dir, "sqlite3")
@@ -986,7 +1018,8 @@ def main():
             print("Warning: sqlite3 binary missing, skipping sqlite3 configs")
         else:
             for ps_kb in page_sizes_kb:
-                configs.append((f"sqlite3_{ps_kb}kb", shell, None, True, ps_kb))
+                label = config_label("libSQL", ps_kb, include_page_size_in_label)
+                configs.append((label, shell, None, True, ps_kb))
 
     if not configs:
         print("Error: no valid configurations found.")
@@ -996,7 +1029,7 @@ def main():
         detect_disk_device(args.db_dir) if args.disk_device == "auto" else args.disk_device
     )
     print(f"Datasets:     {', '.join(n for n, _, _, _ in datasets)}")
-    print(f"Configs:      {', '.join(cfg[0] for cfg in configs)}")
+    print(f"Configs:      {', '.join(display_config_label(cfg[0]) for cfg in configs)}")
     print(f"LSM compression: {args.lsm_compression}")
     print(f"LSM autoflush: {'default' if args.lsm_autoflush_mb is None else str(args.lsm_autoflush_mb) + ' MB'}")
     print(f"LSM automerge: {'default' if args.lsm_automerge is None else args.lsm_automerge}")
@@ -1091,7 +1124,7 @@ def main():
         print(sub)
         print(f"{'-'*w}")
         for r in ds_results:
-            short_label = r['label'].replace(f"{ds_name}_", "")
+            short_label = display_config_label(r['label'].replace(f"{ds_name}_", ""))
             ist = r.get('ins_stats', {})
             stmt_s = ist.get('insert_stmt_total_ms', 0) / 1000
             commit_base_s = ist.get(
