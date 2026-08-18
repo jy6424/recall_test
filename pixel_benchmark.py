@@ -405,6 +405,10 @@ def parse_diskann_stats(stderr_text):
     grab(r'VDBE work:\s*([\d.]+)\s+ms',              'insert_vdbe_work_ms')
     grab(r'insert VDBE other:\s*([\d.]+)\s+ms',      'insert_vdbe_work_ms')
     grab(r'statement finish:\s*([\d.]+)\s+ms',        'insert_stmt_finish_ms')
+    grab(r'KV commit total:\s*([\d.]+)\s+ms',         'insert_kv_commit_total_ms')
+    grab(r'KV commit LSM work:\s*([\d.]+)\s+ms',      'insert_kv_commit_lsm_ms')
+    grab(r'KV commit no LSM:\s*([\d.]+)\s+ms',        'insert_kv_commit_no_lsm_ms')
+    grab(r'Btree commit total:\s*([\d.]+)\s+ms',      'insert_btree_commit_total_ms')
     grab(r'shell db close:\s*([\d.]+)\s+ms',          'shell_close_ms')
     grab(r'shell statements:\s*(\d+)',                 'shell_stmt_count', int)
     grab(r'shell prepare:\s*([\d.]+)\s+ms',           'shell_prepare_ms')
@@ -603,9 +607,17 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
             print(f"        time: real={ins_time.get('real_s',0):.2f}s  "
                   f"user={ins_time.get('user_s',0):.2f}s  sys={ins_time.get('sys_s',0):.2f}s")
         if ins_stats.get('build_total_ms') is not None:
+            commit_s = ins_stats.get(
+                'insert_kv_commit_no_lsm_ms',
+                ins_stats.get('insert_btree_commit_total_ms',
+                    ins_stats.get('insert_stmt_finish_ms', 0))
+            ) / 1000
+            finish_s       = ins_stats.get('insert_stmt_finish_ms', 0) / 1000
+            commit_total_s = ins_stats.get('insert_kv_commit_total_ms', 0) / 1000
+            commit_lsm_s   = ins_stats.get('insert_kv_commit_lsm_ms', 0) / 1000
             print(
                 f"        Stmt={ins_stats.get('insert_stmt_total_ms',0)/1000:.1f}s  "
-                f"Commit={ins_stats.get('insert_stmt_finish_ms',0)/1000:.1f}s  "
+                f"Commit={commit_s:.1f}s  "
                 f"Checkpt={ins_stats.get('step_wal_ms',0)/1000:.1f}s  "
                 f"VecBuild={ins_stats.get('build_total_ms',0)/1000:.1f}s  "
                 f"Shadow={ins_stats.get('shadow_insert_ms',0)/1000:.1f}s  "
@@ -619,6 +631,13 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                 f"PgComp={ins_stats.get('lsm_page_compress_ms',0)/1000:.1f}s  "
                 f"PgDecomp={ins_stats.get('lsm_page_decompress_ms',0)/1000:.1f}s"
             )
+            if ins_stats.get('insert_kv_commit_total_ms') is not None:
+                print(
+                    f"        Finish={finish_s:.1f}s  CommitTotal={commit_total_s:.1f}s  "
+                    f"CommitLSM={commit_lsm_s:.1f}s"
+                )
+            elif ins_stats.get('insert_btree_commit_total_ms') is not None:
+                print(f"        Finish={finish_s:.1f}s")
             if ins_stats.get('step_api_ms') is not None:
                 print(
                     f"        StepApi={ins_stats.get('step_api_ms',0)/1000:.1f}s  "
@@ -711,7 +730,9 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
               f"user={q_time_stats.get('user_s',0):.2f}s  sys={q_time_stats.get('sys_s',0):.2f}s")
     if q_stats.get('graph_ms'):
         print(
-            f"        Graph={q_stats.get('graph_ms',0):.0f}ms  "
+            f"        SearchTotal={q_stats.get('search_total_ms',0):.0f}ms  "
+            f"CtxInit={q_stats.get('ctx_init_ms',0):.0f}ms  "
+            f"Graph={q_stats.get('graph_ms',0):.0f}ms  "
             f"ReadPath={q_stats.get('query_read_ms',0):.0f}ms  "
             f"QueryDist={q_stats.get('query_dist_ms',0):.0f}ms  "
             f"Result={q_stats.get('result_ms',0):.0f}ms  "
@@ -724,7 +745,8 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                 f"BlobRead={q_stats.get('blob_read_call_ms',0):.0f}ms  "
                 f"KVSeek={q_stats.get('kv_seek_ms',0):.0f}ms  "
                 f"KVData={q_stats.get('kv_data_ms',0):.0f}ms  "
-                f"KVDecode={q_stats.get('kv_decode_ms',0):.0f}ms"
+                f"KVDecode={q_stats.get('kv_decode_ms',0):.0f}ms  "
+                f"KVMemcpy={q_stats.get('kv_memcpy_ms',0):.0f}ms"
             )
         if q_stats.get('search_visited_nodes') or q_stats.get('query_node_reads'):
             visited = q_stats.get('search_visited_nodes', 0)
@@ -737,6 +759,14 @@ def run_one_config(label, shell, compact_bin, insert_sql_path, query_sql_path,
                 f"AvgVisited/Q={visited / q if q else 0:.2f}  "
                 f"AvgEdges/Visited={edges / visited if visited else 0:.2f}  "
                 f"AvgReads/Visited={reads / visited if visited else 0:.2f}"
+            )
+        if q_stats.get('vector_search_total_ms'):
+            print(
+                f"        VecSearch={q_stats.get('vector_search_total_ms',0):.0f}ms  "
+                f"VecParse={q_stats.get('vector_parse_ms',0):.0f}ms  "
+                f"IdxLookup={q_stats.get('index_lookup_ms',0):.0f}ms  "
+                f"DiskAnnCall={q_stats.get('diskann_call_ms',0):.0f}ms  "
+                f"VecCleanup={q_stats.get('vector_cleanup_ms',0):.0f}ms"
             )
         if q_stats.get('lsm_page_compress_ms') or q_stats.get('lsm_page_decompress_ms'):
             print(
@@ -773,10 +803,10 @@ def main():
     parser.add_argument("--dataset-dir",    type=str, default="./dataset")
     parser.add_argument("--datasets",       type=str, default="sift,glove,coco,cohere")
     parser.add_argument("--sqlite4-dir",    type=str,
-                        default="/data/local/sqlite4_lsm/MoVeBench",
+                        default="/data/local/sqlite4_lsm/benchmark",
                         help="Device path containing sqlite4 and compact_db")
     parser.add_argument("--sqlite3-dir",    type=str,
-                        default="/data/local/sqlite3_libsql/MoVeBench",
+                        default="/data/local/sqlite3_libsql/benchmark",
                         help="Device path containing sqlite3")
     parser.add_argument("--device-db-dir",  type=str, default="/data/local/tmp",
                         help="Device directory for database files")
@@ -846,8 +876,11 @@ def main():
         else:
             r2 = adb_shell(f"test -x {compact_bin} && echo OK", serial=serial)
             cb = compact_bin if "OK" in r2.stdout else None
-            for ps_kb in page_sizes_kb:
-                configs.append((f"lsm_{ps_kb}kb", shell_bin, cb, False, ps_kb))
+            if use_compaction and cb is None:
+                print(f"Warning: compact_db not found on device ({compact_bin}), skipping sqlite4 configs")
+            else:
+                for ps_kb in page_sizes_kb:
+                    configs.append((f"lsm_{ps_kb}kb", shell_bin, cb, False, ps_kb))
 
     if args.sqlite3_dir:
         shell_bin = f"{args.sqlite3_dir}/sqlite3"
@@ -952,10 +985,16 @@ def main():
             short_label = r['label'].replace(f"{ds_name}_", "")
             ist = r.get('ins_stats', {})
             qst = r.get('q_stats',  {})
+            commit_base_s = ist.get(
+                'insert_kv_commit_no_lsm_ms',
+                ist.get('insert_btree_commit_total_ms',
+                    ist.get('insert_stmt_finish_ms', 0))
+            ) / 1000
+            commit_s = commit_base_s + ist.get('build_write_ms', 0) / 1000
             ins_vals = (
                 f"{r['insert_time_s']:>8.1f} "
                 f"{ist.get('insert_stmt_total_ms',0)/1000:>8.1f} "
-                f"{ist.get('insert_stmt_finish_ms',0)/1000:>8.1f} "
+                f"{commit_s:>8.1f} "
                 f"{ist.get('step_wal_ms',0)/1000:>8.1f} "
                 f"{ist.get('build_total_ms',0)/1000:>8.1f} "
                 f"{ist.get('shadow_insert_ms',0)/1000:>8.1f} "
